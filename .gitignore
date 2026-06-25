@@ -1,0 +1,9 @@
+.superpowers/
+.venv/
+.idea/
+__pycache__/
+*.pyc
+.pytest_cache/
+Input/
+Output/
+piano_transcription_inference_data/*.pth

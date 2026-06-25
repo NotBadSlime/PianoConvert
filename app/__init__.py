@@ -1,0 +1,1 @@
+"""PianoConvert desktop application package."""
