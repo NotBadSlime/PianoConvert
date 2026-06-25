@@ -4,6 +4,7 @@ from pathlib import Path
 
 from app.engines.base import CancelCallback, EngineCancelled, ProgressCallback
 from app.models import NoteEvent, PedalEvent, TranscriptionParameters, TranscriptionResult
+from app.paths import resource_path
 from app.postprocess import apply_postprocess
 from piano_transcription_inference import PianoTranscription, load_audio, sample_rate
 from piano_transcription_inference.utilities import write_events_to_midi
@@ -45,6 +46,12 @@ class KongPianoEngine:
 
         transcriptor = self._transcriptor_factory(
             device=device,
+            checkpoint_path=str(
+                resource_path(
+                    "piano_transcription_inference_data",
+                    "note_F1=0.9677_pedal_F1=0.9186.pth",
+                )
+            ),
             onset_threshold=parameters.onset_threshold,
             offset_threshold=parameters.offset_threshold,
             frame_threshold=parameters.frame_threshold,

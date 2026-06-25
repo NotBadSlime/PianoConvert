@@ -73,9 +73,32 @@ $env:QT_QPA_PLATFORM='offscreen'
 .\.venv\Scripts\python.exe -m pytest tests/test_ui_smoke.py -v
 ```
 
+## Build Windows Installer
+
+The installer build bundles the desktop app and the local model checkpoint into a full offline installer. Make sure Inno Setup 6 is installed and the model checkpoint exists at `piano_transcription_inference_data/`.
+
+Build the PyInstaller app directory:
+
+```powershell
+.\scripts\build_exe.ps1
+```
+
+Build the full Inno Setup installer:
+
+```powershell
+.\scripts\build_installer.ps1
+```
+
+The installer is written to:
+
+```text
+installer/PianoConvertSetup-0.1.0.exe
+```
+
 ## Notes
 
 - CUDA is used when available and selected.
 - CPU mode is slower but useful as a fallback.
 - Generated MIDI files are ignored by git through `Output/`.
+- Installer build artifacts are ignored by git through `build/`, `dist/`, and `installer/`.
 - The UI reads note events directly for piano-roll preview and writes MIDI from the same event data, keeping preview and export aligned.

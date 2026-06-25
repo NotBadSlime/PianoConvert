@@ -7,3 +7,7 @@ __pycache__/
 Input/
 Output/
 piano_transcription_inference_data/*.pth
+build/
+dist/
+installer/
+*.spec.bak

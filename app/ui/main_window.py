@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 from app.engines.kong_piano import KongPianoEngine
 from app.jobs import TaskQueueRunner
 from app.models import TaskStatus, TranscriptionParameters, TranscriptionTask
+from app.paths import default_output_dir
 from app.ui.piano_roll import PianoRollWidget
 
 
@@ -74,8 +75,8 @@ class MainWindow(QMainWindow):
         self.resize(1180, 760)
         self.tasks: list[TranscriptionTask] = []
         self.worker: TranscriptionThread | None = None
-        self.output_dir = Path("Output")
-        self.output_dir.mkdir(exist_ok=True)
+        self.output_dir = default_output_dir()
+        self.output_dir.mkdir(parents=True, exist_ok=True)
 
         self.player = QMediaPlayer(self)
         self.audio_output = QAudioOutput(self)
@@ -419,7 +420,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Exported {destination}")
 
     def open_output_dir(self) -> None:
-        self.output_dir.mkdir(exist_ok=True)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.output_dir.resolve())))
 
 
