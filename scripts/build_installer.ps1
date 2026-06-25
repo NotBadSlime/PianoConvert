@@ -1,30 +1,36 @@
 param(
     [string]$Python = ".\.venv\Scripts\python.exe",
-    [string]$ISCC = ""
+    [string]$ISCC = "",
+    [string]$Version = $env:PIANOCONVERT_VERSION
 )
 
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $Root
 
+if (!$Version) {
+    $Version = "0.1.0"
+}
+
 & (Join-Path $Root "scripts\build_exe.ps1") -Python $Python
 
 if (!$ISCC) {
+    $Command = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+    if ($Command) {
+        $ISCC = $Command.Source
+    }
+}
+
+if (!$ISCC) {
     $Candidates = @(
-        "C:\Users\12849\AppData\Local\Programs\Inno Setup 6\ISCC.exe",
-        "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
-        "C:\Program Files\Inno Setup 6\ISCC.exe"
+        (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"),
+        (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"),
+        (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe")
     )
     foreach ($Candidate in $Candidates) {
         if (Test-Path $Candidate) {
             $ISCC = $Candidate
             break
-        }
-    }
-    if (!$ISCC) {
-        $Command = Get-Command ISCC.exe -ErrorAction SilentlyContinue
-        if ($Command) {
-            $ISCC = $Command.Source
         }
     }
 }
@@ -38,14 +44,14 @@ if (!(Test-Path $ScriptPath)) {
     throw "Inno Setup script not found: $ScriptPath"
 }
 
-& $ISCC $ScriptPath
+& $ISCC "/DMyAppVersion=$Version" $ScriptPath
 if ($LASTEXITCODE -ne 0) {
     throw "Inno Setup build failed."
 }
 
-$Installers = Get-ChildItem (Join-Path $Root "installer") -Filter "PianoConvertSetup-*.exe" | Sort-Object LastWriteTime -Descending
-if (!$Installers) {
-    throw "Installer output missing."
+$InstallerPath = Join-Path $Root "installer\PianoConvertSetup-$Version.exe"
+if (!(Test-Path $InstallerPath)) {
+    throw "Installer output missing: $InstallerPath"
 }
 
-Write-Host "Built installer: $($Installers[0].FullName)"
+Write-Host "Built installer: $InstallerPath"

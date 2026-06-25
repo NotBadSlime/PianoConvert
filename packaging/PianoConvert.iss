@@ -1,5 +1,7 @@
 #define MyAppName "PianoConvert"
+#ifndef MyAppVersion
 #define MyAppVersion "0.1.0"
+#endif
 #define MyAppPublisher "NotBadSlime"
 #define MyAppExeName "PianoConvert.exe"
 

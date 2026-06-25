@@ -89,11 +89,32 @@ Build the full Inno Setup installer:
 .\scripts\build_installer.ps1
 ```
 
+Build a specific installer version:
+
+```powershell
+.\scripts\build_installer.ps1 -Version 0.1.0
+```
+
 The installer is written to:
 
 ```text
 installer/PianoConvertSetup-0.1.0.exe
 ```
+
+## Publish A GitHub Release
+
+GitHub Actions can build the same offline Windows installer and attach it to a Release. Push a version tag to start a release build:
+
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+You can also start `Release Installer` manually from the GitHub Actions tab and enter a version such as `v0.1.0`.
+
+The workflow downloads the model checkpoint during the build, runs tests, builds the PyInstaller app, compiles the Inno Setup installer, uploads it as a workflow artifact, and publishes `PianoConvertSetup-<version>.exe` to GitHub Releases.
+
+The installer is large because it bundles Python runtime files, PyTorch, PySide6, and the transcription model checkpoint.
 
 ## Notes
 
