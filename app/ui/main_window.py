@@ -33,6 +33,7 @@ from app.engines.kong_piano import KongPianoEngine
 from app.jobs import TaskQueueRunner
 from app.models import TaskStatus, TranscriptionParameters, TranscriptionTask
 from app.paths import default_output_dir
+from app.ui.theme import DARK_STYLESHEET
 from app.ui.piano_roll import PianoRollWidget
 
 
@@ -222,16 +223,7 @@ class MainWindow(QMainWindow):
         return spin
 
     def _apply_style(self) -> None:
-        self.setStyleSheet(
-            """
-            QMainWindow { background: #f5f7fb; }
-            QListWidget { background: white; border: 1px solid #d8e0ec; }
-            QLabel#Title { font-size: 18px; font-weight: 600; color: #172033; }
-            QLabel#PanelTitle { font-size: 16px; font-weight: 600; margin-bottom: 8px; }
-            QPushButton { padding: 6px 10px; }
-            QToolBar { background: white; border-bottom: 1px solid #d8e0ec; spacing: 8px; }
-            """
-        )
+        self.setStyleSheet(DARK_STYLESHEET)
 
     def import_audio(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(
