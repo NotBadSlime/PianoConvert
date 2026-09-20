@@ -6,5 +6,4 @@ build/
 dist/
 installer/output/
 Output/
-*.spec
 models/*.pth
