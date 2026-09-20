@@ -9,9 +9,15 @@ from app.engines.base import CancelledError
 
 
 class FakeEngine:
-    def __init__(self, fail: Exception | None = None, hang_until_cancel: bool = False):
+    def __init__(
+        self,
+        fail: Exception | None = None,
+        hang_until_cancel: bool = False,
+        raise_cancel_after_write: bool = False,
+    ):
         self.fail = fail
         self.hang_until_cancel = hang_until_cancel
+        self.raise_cancel_after_write = raise_cancel_after_write
         self.calls = 0
 
     def transcribe(self, audio_path: Path, dest_midi: Path, cancel: Event, on_progress) -> None:
@@ -27,6 +33,8 @@ class FakeEngine:
         inst.notes.append(pretty_midi.Note(velocity=80, pitch=64, start=0.0, end=0.4))
         pm.instruments.append(inst)
         pm.write(str(dest_midi))
+        if self.raise_cancel_after_write:
+            raise CancelledError()
 
 
 def test_rejects_bad_suffix(tmp_path):
@@ -73,14 +81,53 @@ def test_failed_transcribe_humanizes_cuda(tmp_path):
     )
     assert result.status == "failed"
     assert "显存不足" in result.error
+    assert result.folder.exists()
+
+
+def test_oserror_write_humanized(tmp_path, monkeypatch):
+    src = tmp_path / "tune.wav"
+    src.write_bytes(b"xx")
+
+    def boom(midi, dest):
+        raise OSError(28, "No space")
+
+    monkeypatch.setattr("app.convert.midi_to_musicxml", boom)
+    result = run(src, "piano", engines={"piano": FakeEngine()}, cancel=Event(), output_root=tmp_path)
+    assert result.status == "failed"
+    assert "无法写入输出目录" in result.error
+    assert result.folder.exists()
+
+
+def test_musicxml_cancelled_error_does_not_keep_folder(tmp_path, monkeypatch):
+    src = tmp_path / "tune.wav"
+    src.write_bytes(b"xx")
+
+    def boom(midi, dest):
+        raise CancelledError()
+
+    monkeypatch.setattr("app.convert.midi_to_musicxml", boom)
+    result = run(src, "piano", engines={"piano": FakeEngine()}, cancel=Event(), output_root=tmp_path)
+    assert result.status == "cancelled"
+    assert not result.folder.exists()
 
 
 def test_cancel_does_not_keep_folder(tmp_path):
     src = tmp_path / "tune.flac"
     src.write_bytes(b"xx")
+    engine = FakeEngine(hang_until_cancel=True)
+    result = run(src, "other", engines={"other": engine}, cancel=Event(), output_root=tmp_path)
+    assert result.status == "cancelled"
+    assert not result.folder.exists()
+    assert engine.calls == 1
+
+
+def test_cancel_before_start(tmp_path):
+    src = tmp_path / "tune.mp3"
+    src.write_bytes(b"xx")
     cancel = Event()
     cancel.set()
-    result = run(src, "other", engines={"other": FakeEngine(hang_until_cancel=True)}, cancel=cancel, output_root=tmp_path)
+    engine = FakeEngine()
+    result = run(src, "piano", engines={"piano": engine}, cancel=cancel, output_root=tmp_path)
     assert result.status == "cancelled"
     assert not result.folder.exists()
 

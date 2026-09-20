@@ -90,6 +90,10 @@ def run(
             progress("写入 MusicXML", 0.85)
             midi_to_musicxml(midi_path, xml_path)
         except Exception as exc:  # noqa: BLE001
+            if isinstance(exc, (CancelledError, ConvertError)):
+                raise
+            if isinstance(exc, OSError) and getattr(exc, "errno", None) in {13, 28}:
+                raise
             return ConvertResult(
                 "partial",
                 folder,
@@ -105,6 +109,8 @@ def run(
     except CancelledError:
         return _cancelled_result()
     except ConvertError:
+        if folder.exists():
+            shutil.rmtree(folder, ignore_errors=True)
         raise
     except Exception as exc:  # noqa: BLE001
         return ConvertResult("failed", folder, midi_path, xml_path, humanize_error(exc), source.stem, kind, source)
