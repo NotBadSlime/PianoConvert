@@ -1,6 +1,8 @@
+import sys
+
+import pytest
 from pathlib import Path
 
-from app.device import resolve_device
 from app.paths import history_path, make_output_dir, model_checkpoint, output_root
 
 
@@ -30,6 +32,13 @@ def test_model_checkpoint_prefers_repo_models(tmp_path, monkeypatch):
     pth.write_bytes(b"x")
     monkeypatch.setattr("app.paths.repo_root", lambda: tmp_path)
     assert model_checkpoint() == pth
+
+
+def test_model_checkpoint_missing_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.paths.repo_root", lambda: tmp_path)
+    monkeypatch.delattr(sys, "_MEIPASS", raising=False)
+    with pytest.raises(FileNotFoundError, match="找不到钢琴模型"):
+        model_checkpoint()
 
 
 def test_resolve_device_cpu_when_cuda_false(monkeypatch):
