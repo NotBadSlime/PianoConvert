@@ -354,14 +354,17 @@ class MainWindow(QMainWindow):
             self._reset_idle_ui("已取消")
             return
         if status in {"success", "partial", "failed"}:
-            self._save_history(result)
-            self.reload_history()
-            if self.history_list.count():
-                self.history_list.setCurrentRow(0)
             labels = {"success": "完成", "partial": "部分成功", "failed": "转换失败"}
-            if status == "success":
-                self.progress_bar.setValue(100)
-            self._reset_idle_ui(labels.get(status, "转换结束"))
+            status_text = labels.get(status, "转换结束")
+            try:
+                self._save_history(result)
+                self.reload_history()
+                if self.history_list.count():
+                    self.history_list.setCurrentRow(0)
+                if status == "success":
+                    self.progress_bar.setValue(100)
+            finally:
+                self._reset_idle_ui(status_text)
             return
         self._reset_idle_ui("转换结束")
 
