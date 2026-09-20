@@ -1,0 +1,42 @@
+from __future__ import annotations
+
+import os
+from datetime import datetime
+from pathlib import Path
+
+CHECKPOINT_NAME = "note_F1=0.9677_pedal_F1=0.9186.pth"
+
+
+def repo_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _now_stamp() -> str:
+    return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def output_root() -> Path:
+    return Path.home() / "Documents" / "PianoConvert" / "Output"
+
+
+def history_path() -> Path:
+    base = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
+    return base / "PianoConvert" / "history.json"
+
+
+def make_output_dir(source: Path) -> Path:
+    folder = output_root() / f"{source.stem}_{_now_stamp()}"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def model_checkpoint() -> Path:
+    bundled = repo_root() / "models" / CHECKPOINT_NAME
+    if bundled.exists():
+        return bundled
+    meipass = getattr(__import__("sys"), "_MEIPASS", None)
+    if meipass:
+        frozen = Path(meipass) / "piano_transcription_inference_data" / CHECKPOINT_NAME
+        if frozen.exists():
+            return frozen
+    raise FileNotFoundError(f"找不到钢琴模型: {CHECKPOINT_NAME}")
