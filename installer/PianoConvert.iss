@@ -1,5 +1,5 @@
 #define MyAppName "PianoConvert"
-#define MyAppVersion "0.2.0"
+#define MyAppVersion "0.3.0"
 #define MyAppExeName "PianoConvert.exe"
 
 [Setup]

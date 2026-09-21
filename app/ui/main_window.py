@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 from datetime import datetime
 from pathlib import Path
@@ -26,13 +25,14 @@ from PySide6.QtWidgets import (
 )
 
 from app.convert import AUDIO_SUFFIXES
-from app.history import HistoryItem, append_item
-from app.paths import history_path
+from app.history import HistoryItem, append_item, load_items
+from app.keyboard_score import SCORE_SUFFIXES
 from app.ui.styles import APP_QSS
 
-KIND_LABELS = {"piano": "钢琴", "other": "其他乐器"}
+KIND_LABELS = {"piano": "钢琴", "other": "其他乐器", "score": "键盘谱"}
 STATUS_LABELS = {"success": "成功", "partial": "部分成功", "failed": "失败"}
 AUDIO_FILTER = "音频文件 (*.mp3 *.wav *.flac *.ogg *.m4a)"
+SCORE_FILTER = "乐谱文件 (*.mid *.midi *.musicxml *.xml)"
 
 
 def default_engines():
@@ -42,15 +42,19 @@ def default_engines():
     return {"piano": KongPianoEngine(), "other": BasicPitchEngine()}
 
 
-def _first_audio_path(event: QDragEnterEvent | QDropEvent) -> Path | None:
+def _first_dropped_path(event: QDragEnterEvent | QDropEvent) -> Path | None:
     mime = event.mimeData()
     if not mime.hasUrls():
         return None
     for url in mime.urls():
         path = Path(url.toLocalFile())
-        if path.suffix.lower() in AUDIO_SUFFIXES:
+        if path.suffix.lower() in AUDIO_SUFFIXES | SCORE_SUFFIXES:
             return path
     return None
+
+
+def _is_score_path(path: Path | None) -> bool:
+    return path is not None and path.suffix.lower() in SCORE_SUFFIXES
 
 
 def _format_time(raw: str) -> str:
@@ -107,7 +111,13 @@ class HistoryRow(QWidget):
         text_col.addWidget(title)
         text_col.addWidget(meta)
         if item.status == "partial":
-            note = QLabel("谱面导出失败")
+            if "键盘谱导出失败" in (item.error or "") and "谱面导出失败" not in (item.error or ""):
+                note_text = "键盘谱导出失败"
+            elif "键盘谱导出失败" in (item.error or "") and "谱面导出失败" in (item.error or ""):
+                note_text = "谱面或键盘谱导出失败"
+            else:
+                note_text = "谱面导出失败"
+            note = QLabel(note_text)
             note.setObjectName("note")
             text_col.addWidget(note)
         elif item.status == "failed" and item.error:
@@ -118,16 +128,22 @@ class HistoryRow(QWidget):
 
         self.midi_button = QPushButton("打开 MIDI")
         self.xml_button = QPushButton("打开 MusicXML")
+        self.keyboard_button = QPushButton("打开键盘谱")
         self.folder_button = QPushButton("打开文件夹")
         self.midi_button.clicked.connect(lambda: self._open(item.midi_path))
         self.xml_button.clicked.connect(lambda: self._open(item.musicxml_path))
+        self.keyboard_button.clicked.connect(lambda: self._open(item.keyboard_path))
         self.folder_button.clicked.connect(lambda: self._open(item.folder))
 
-        if item.status == "partial":
-            self.xml_button.setEnabled(False)
-        elif item.status == "failed":
+        self.midi_button.setEnabled(bool(item.midi_path) and Path(item.midi_path).exists())
+        self.xml_button.setEnabled(bool(item.musicxml_path) and Path(item.musicxml_path).exists())
+        self.keyboard_button.setEnabled(bool(item.keyboard_path) and Path(item.keyboard_path).exists())
+        self.folder_button.setEnabled(bool(item.folder) and Path(item.folder).exists())
+
+        if item.status == "failed":
             self.midi_button.hide()
             self.xml_button.hide()
+            self.keyboard_button.hide()
             self.folder_button.hide()
 
         row = QHBoxLayout(self)
@@ -136,6 +152,7 @@ class HistoryRow(QWidget):
         row.addLayout(text_col, 1)
         row.addWidget(self.midi_button)
         row.addWidget(self.xml_button)
+        row.addWidget(self.keyboard_button)
         row.addWidget(self.folder_button)
         self.setMinimumHeight(72)
 
@@ -179,7 +196,10 @@ class MainWindow(QMainWindow):
 
         def _fn(source, kind, cancel, on_progress):
             from app.convert import run as convert_run
+            from app.convert import run_score
 
+            if kind == "score":
+                return run_score(source, cancel, output_root=None, on_progress=on_progress)
             return convert_run(
                 source,
                 kind,
@@ -202,20 +222,24 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("使用 CPU，会比较慢")
 
     def _build_ui(self) -> None:
-        hero = QLabel("把音频转成乐谱")
+        hero = QLabel("把音频或乐谱转成琴谱")
         hero.setObjectName("hero")
-        subtitle = QLabel("选择一首音频，生成 MIDI 和 MusicXML")
+        subtitle = QLabel("音频生成 MIDI、MusicXML 和原神键盘谱；也可直接选 MIDI / MusicXML")
         subtitle.setObjectName("muted")
 
         self.pick_button = QPushButton("选择音频文件")
         self.pick_button.clicked.connect(self._choose_file)
+        self.pick_score_button = QPushButton("选择 MIDI / MusicXML")
+        self.pick_score_button.clicked.connect(self._choose_score_file)
         self.file_label = QLabel("尚未选择文件")
         self.file_label.setObjectName("muted")
 
         file_row = QHBoxLayout()
         file_row.addWidget(self.pick_button)
+        file_row.addWidget(self.pick_score_button)
         file_row.addWidget(self.file_label, 1)
 
+        self.kind_label = QLabel("乐器类型")
         self.piano_radio = QRadioButton("钢琴")
         self.other_radio = QRadioButton("其他乐器")
         self.piano_radio.setChecked(True)
@@ -242,7 +266,7 @@ class MainWindow(QMainWindow):
         card_layout.addWidget(hero)
         card_layout.addWidget(subtitle)
         card_layout.addLayout(file_row)
-        card_layout.addWidget(QLabel("乐器类型"))
+        card_layout.addWidget(self.kind_label)
         card_layout.addLayout(kind_row)
         card_layout.addWidget(self.start_button)
         card_layout.addWidget(self.progress_bar)
@@ -281,13 +305,13 @@ class MainWindow(QMainWindow):
         return super().eventFilter(watched, event)
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
-        if self._busy or _first_audio_path(event) is None:
+        if self._busy or _first_dropped_path(event) is None:
             event.ignore()
             return
         event.acceptProposedAction()
 
     def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802
-        path = None if self._busy else _first_audio_path(event)
+        path = None if self._busy else _first_dropped_path(event)
         if path is None:
             event.ignore()
             return
@@ -297,13 +321,30 @@ class MainWindow(QMainWindow):
     def set_source_file(self, path: Path) -> None:
         self._source = Path(path)
         self.file_label.setText(self._source.name)
+        self._apply_source_mode()
         if not self._busy:
             self.start_button.setEnabled(True)
+
+    def _apply_source_mode(self) -> None:
+        score = _is_score_path(self._source)
+        self.kind_label.setVisible(not score)
+        self.piano_radio.setVisible(not score)
+        self.other_radio.setVisible(not score)
+        if self._busy:
+            return
+        self.start_button.setText("转换为键盘谱" if score else "开始转换")
 
     def _choose_file(self) -> None:
         if self._busy:
             return
         chosen, _ = QFileDialog.getOpenFileName(self, "选择音频文件", "", AUDIO_FILTER)
+        if chosen:
+            self.set_source_file(Path(chosen))
+
+    def _choose_score_file(self) -> None:
+        if self._busy:
+            return
+        chosen, _ = QFileDialog.getOpenFileName(self, "选择 MIDI / MusicXML", "", SCORE_FILTER)
         if chosen:
             self.set_source_file(Path(chosen))
 
@@ -325,12 +366,13 @@ class MainWindow(QMainWindow):
         self.start_button.setText("取消")
         self.start_button.setEnabled(True)
         self.pick_button.setEnabled(False)
+        self.pick_score_button.setEnabled(False)
         self.piano_radio.setEnabled(False)
         self.other_radio.setEnabled(False)
         self.progress_bar.setValue(0)
         self.status_label.setText("准备中")
 
-        kind = "piano" if self.piano_radio.isChecked() else "other"
+        kind = "score" if _is_score_path(self._source) else ("piano" if self.piano_radio.isChecked() else "other")
         self._thread = QThread(self)
         self._worker = ConvertWorker(self._convert_fn, self._source, kind, self._cancel)
         self._worker.moveToThread(self._thread)
@@ -376,11 +418,12 @@ class MainWindow(QMainWindow):
     def _reset_idle_ui(self, status_text: str = "") -> None:
         self._busy = False
         self._cancel = None
-        self.start_button.setText("开始转换")
-        self.start_button.setEnabled(self._source is not None)
         self.pick_button.setEnabled(True)
+        self.pick_score_button.setEnabled(True)
         self.piano_radio.setEnabled(True)
         self.other_radio.setEnabled(True)
+        self._apply_source_mode()
+        self.start_button.setEnabled(self._source is not None)
         if status_text:
             self.status_label.setText(status_text)
 
@@ -397,15 +440,12 @@ class MainWindow(QMainWindow):
                 musicxml_path=str(result.musicxml_path),
                 folder=str(result.folder),
                 error=result.error or "",
+                keyboard_path=str(getattr(result, "keyboard_path", "") or ""),
             )
         )
 
     def reload_history(self) -> None:
-        path = history_path()
-        if path.exists():
-            items = [HistoryItem(**row) for row in json.loads(path.read_text(encoding="utf-8"))]
-        else:
-            items = []
+        items = load_items()
         self.history_list.clear()
         for item in items[::-1]:
             row = HistoryRow(item, self.history_list)

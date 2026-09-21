@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 from app.paths import history_path
@@ -19,6 +19,14 @@ class HistoryItem:
     musicxml_path: str
     folder: str
     error: str
+    keyboard_path: str = ""
+
+
+def item_from_row(row: dict) -> HistoryItem:
+    allowed = {f.name for f in fields(HistoryItem)}
+    data = {key: row[key] for key in allowed if key in row}
+    data.setdefault("keyboard_path", "")
+    return HistoryItem(**data)
 
 
 def load_items() -> list[HistoryItem]:
@@ -26,7 +34,7 @@ def load_items() -> list[HistoryItem]:
     if not path.exists():
         return []
     raw = json.loads(path.read_text(encoding="utf-8"))
-    return [HistoryItem(**row) for row in raw]
+    return [item_from_row(row) for row in raw]
 
 
 def append_item(item: HistoryItem) -> None:

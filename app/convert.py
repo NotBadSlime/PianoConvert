@@ -7,6 +7,11 @@ from threading import Event
 from typing import Mapping
 
 from app.engines.base import CancelledError, TranscriptionEngine
+from app.keyboard_score import (
+    SCORE_SUFFIXES,
+    KeyboardScoreError,
+    score_file_to_keyboard_text,
+)
 from app.score_io import midi_to_musicxml
 
 AUDIO_SUFFIXES = {".mp3", ".wav", ".flac", ".ogg", ".m4a"}
@@ -26,9 +31,12 @@ class ConvertResult:
     title: str
     kind: str
     source_path: Path
+    keyboard_path: Path
 
 
 def humanize_error(exc: BaseException) -> str:
+    if isinstance(exc, KeyboardScoreError):
+        return str(exc)
     text = str(exc)
     low = text.lower()
     if isinstance(exc, OSError) and getattr(exc, "errno", None) in {13, 28}:
@@ -46,6 +54,10 @@ def _stamp_dir(output_root: Path, source: Path) -> Path:
     folder = output_root / f"{source.stem}_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     folder.mkdir(parents=True, exist_ok=True)
     return folder
+
+
+def _write_keyboard(midi_or_score: Path, dest: Path, title: str) -> None:
+    dest.write_text(score_file_to_keyboard_text(midi_or_score, title), encoding="utf-8")
 
 
 def run(
@@ -68,12 +80,18 @@ def run(
     folder = _stamp_dir(root, source)
     midi_path = folder / f"{source.stem}.mid"
     xml_path = folder / f"{source.stem}.musicxml"
+    keyboard_path = folder / f"{source.stem}_键盘谱.txt"
     progress = on_progress or (lambda _m, _p: None)
 
     def _cancelled_result(err: str = "") -> ConvertResult:
         if folder.exists():
             shutil.rmtree(folder, ignore_errors=True)
-        return ConvertResult("cancelled", folder, midi_path, xml_path, err, source.stem, kind, source)
+        return ConvertResult(
+            "cancelled", folder, midi_path, xml_path, err, source.stem, kind, source, keyboard_path
+        )
+
+    def _pack(status: str, error: str) -> ConvertResult:
+        return ConvertResult(status, folder, midi_path, xml_path, error, source.stem, kind, source, keyboard_path)
 
     try:
         if cancel.is_set():
@@ -86,6 +104,7 @@ def run(
         progress("写入 MIDI", 0.7)
         if not midi_path.exists():
             raise RuntimeError("引擎没有写出 MIDI")
+        errors: list[str] = []
         try:
             progress("写入 MusicXML", 0.85)
             midi_to_musicxml(midi_path, xml_path)
@@ -94,18 +113,21 @@ def run(
                 raise
             if isinstance(exc, OSError) and getattr(exc, "errno", None) in {13, 28}:
                 raise
-            return ConvertResult(
-                "partial",
-                folder,
-                midi_path,
-                xml_path,
-                f"谱面导出失败：{exc}"[:200],
-                source.stem,
-                kind,
-                source,
-            )
+            errors.append(f"谱面导出失败：{exc}"[:200])
+        try:
+            progress("写入键盘谱", 0.92)
+            _write_keyboard(midi_path, keyboard_path, source.stem)
+        except Exception as exc:  # noqa: BLE001
+            if isinstance(exc, CancelledError):
+                raise
+            if isinstance(exc, OSError) and getattr(exc, "errno", None) in {13, 28}:
+                errors.append("无法写入输出目录")
+            else:
+                errors.append("键盘谱导出失败")
+        if errors:
+            return _pack("partial", "；".join(errors))
         progress("完成", 1.0)
-        return ConvertResult("success", folder, midi_path, xml_path, "", source.stem, kind, source)
+        return _pack("success", "")
     except CancelledError:
         return _cancelled_result()
     except ConvertError:
@@ -113,4 +135,65 @@ def run(
             shutil.rmtree(folder, ignore_errors=True)
         raise
     except Exception as exc:  # noqa: BLE001
-        return ConvertResult("failed", folder, midi_path, xml_path, humanize_error(exc), source.stem, kind, source)
+        return _pack("failed", humanize_error(exc))
+
+
+def run_score(
+    source: Path,
+    cancel: Event,
+    output_root: Path | None = None,
+    on_progress=None,
+) -> ConvertResult:
+    source = Path(source)
+    suffix = source.suffix.lower()
+    if suffix not in SCORE_SUFFIXES or not source.exists():
+        raise ConvertError("不支持这个乐谱文件")
+    from app.paths import output_root as default_root
+
+    root = output_root or default_root()
+    root.mkdir(parents=True, exist_ok=True)
+    folder = _stamp_dir(root, source)
+    copied = folder / source.name
+    keyboard_path = folder / f"{source.stem}_键盘谱.txt"
+    if suffix in {".mid", ".midi"}:
+        midi_path = copied
+        xml_path = folder / f"{source.stem}.musicxml"
+    else:
+        midi_path = folder / f"{source.stem}.mid"
+        xml_path = copied
+    kind = "score"
+    progress = on_progress or (lambda _m, _p: None)
+
+    def _cancelled_result(err: str = "") -> ConvertResult:
+        if folder.exists():
+            shutil.rmtree(folder, ignore_errors=True)
+        return ConvertResult(
+            "cancelled", folder, midi_path, xml_path, err, source.stem, kind, source, keyboard_path
+        )
+
+    def _pack(status: str, error: str) -> ConvertResult:
+        return ConvertResult(status, folder, midi_path, xml_path, error, source.stem, kind, source, keyboard_path)
+
+    try:
+        if cancel.is_set():
+            return _cancelled_result()
+        progress("读取乐谱", 0.2)
+        shutil.copy2(source, copied)
+        if cancel.is_set():
+            return _cancelled_result()
+        progress("写入键盘谱", 0.6)
+        _write_keyboard(copied, keyboard_path, source.stem)
+        progress("完成", 1.0)
+        return _pack("success", "")
+    except CancelledError:
+        return _cancelled_result()
+    except ConvertError:
+        if folder.exists():
+            shutil.rmtree(folder, ignore_errors=True)
+        raise
+    except KeyboardScoreError as exc:
+        return _pack("failed", str(exc))
+    except OSError:
+        return _pack("failed", "无法写入输出目录")
+    except Exception as exc:  # noqa: BLE001
+        return _pack("failed", humanize_error(exc))

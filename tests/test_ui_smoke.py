@@ -33,7 +33,6 @@ def test_choosing_file_enables_start(tmp_path):
 def test_partial_row_disables_musicxml(tmp_path, monkeypatch):
     hist = tmp_path / "h.json"
     monkeypatch.setattr("app.history.history_path", lambda: hist)
-    monkeypatch.setattr("app.ui.main_window.history_path", lambda: hist)
     midi = tmp_path / "t.mid"
     midi.write_bytes(b"m")
     append_item(
@@ -57,6 +56,20 @@ def test_partial_row_disables_musicxml(tmp_path, monkeypatch):
     assert row is not None
     assert row.xml_button.isEnabled() is False
     assert row.midi_button.isEnabled() is True
+    assert row.keyboard_button.isEnabled() is False
+
+
+def test_score_file_hides_instrument_and_changes_start(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    win = MainWindow()
+    src = tmp_path / "a.mid"
+    src.write_bytes(b"x")
+    win.set_source_file(src)
+    assert win.piano_radio.isHidden() is True
+    assert win.other_radio.isHidden() is True
+    assert win.kind_label.isHidden() is True
+    assert win.start_button.text() == "转换为键盘谱"
+    assert win.start_button.isEnabled() is True
 
 
 def test_finished_resets_ui_if_history_save_fails(tmp_path, monkeypatch):
@@ -81,6 +94,7 @@ def test_finished_resets_ui_if_history_save_fails(tmp_path, monkeypatch):
         title="t",
         kind="piano",
         source_path=src,
+        keyboard_path=tmp_path / "t_键盘谱.txt",
     )
     with pytest.raises(OSError, match="disk full"):
         win._on_finished(result)
