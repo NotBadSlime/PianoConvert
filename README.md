@@ -1,125 +1,43 @@
 # PianoConvert
 
-PianoConvert is an offline Windows desktop tool for converting piano-forward audio into MIDI. It wraps a local piano transcription model in a PySide6 workbench with batch import, CUDA/CPU selection, transcription presets, parameter tuning, piano-roll preview, playback controls, and MIDI export.
+离线音频转 MIDI + MusicXML。钢琴用 Kong 模型，其他乐器用 basic-pitch。
 
-## Scope
-
-This first version is designed for:
-
-- Pure piano recordings.
-- Piano covers and piano-forward MP3/WAV files.
-- Piano recordings with reasonable room noise, reverb, or live-recording character.
-- Fully offline local processing.
-
-It does not currently include vocal/accompaniment source separation, staff notation PDF export, MusicXML export, or manual MIDI note editing.
-
-## Setup
-
-Use the project virtual environment on Windows:
+开发时请将 Kong 模型 checkpoint 从安装目录复制到 `models/`：
 
 ```powershell
+Copy-Item "E:\PianoConvert\_internal\piano_transcription_inference_data\note_F1=0.9677_pedal_F1=0.9186.pth" "models\"
+```
+
+```powershell
+py -3.10 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-```
-
-The model checkpoint must exist at:
-
-```text
-piano_transcription_inference_data/note_F1=0.9677_pedal_F1=0.9186.pth
-```
-
-## Run The Desktop App
-
-```powershell
 .\.venv\Scripts\python.exe -m app
-```
-
-You can also double-click:
-
-```text
-launch_desktop.bat
-```
-
-## CLI Fallback
-
-The original batch script is still available:
-
-```powershell
-.\.venv\Scripts\python.exe start.py
-```
-
-It reads audio files from `Input/` and writes MIDI files to `Output/`.
-
-## Desktop Workflow
-
-1. Import one or more audio files.
-2. Choose `cuda` or `cpu`.
-3. Choose `balanced` or `precise`.
-4. Adjust thresholds, minimum note duration, quantization, and pedal output if needed.
-5. Start the queue.
-6. Inspect the result in the piano-roll preview.
-7. Re-run selected tasks after parameter changes.
-8. Export MIDI.
-
-## Tests
-
-```powershell
 .\.venv\Scripts\python.exe -m pytest -v
 ```
 
-For headless UI smoke tests:
+## 发布
 
-```powershell
-$env:QT_QPA_PLATFORM='offscreen'
-.\.venv\Scripts\python.exe -m pytest tests/test_ui_smoke.py -v
-```
+1. `gh auth login`（本机若未登录 GitHub CLI）
+2. 在 GitHub 创建公开仓库 `PianoConvert`，然后 `git remote add origin https://github.com/<user>/PianoConvert.git`
+3. `git tag v0.2.0 && git push origin main --tags`
 
-## Build Windows Installer
+推送 `v*` 标签后，GitHub Actions 会运行测试、打包 PyInstaller 并编译 Inno Setup 安装包，将 `PianoConvertSetup-<version>.exe` 挂到对应 Release。
 
-The installer build bundles the desktop app and the local model checkpoint into a full offline installer. Make sure Inno Setup 6 is installed and the model checkpoint exists at `piano_transcription_inference_data/`.
+也可在 Actions 页手动触发 **Release Installer** workflow，填写版本号（如 `0.2.0`）。
 
-Build the PyInstaller app directory:
+### 本地打包
 
-```powershell
-.\scripts\build_exe.ps1
-```
-
-Build the full Inno Setup installer:
+不依赖 GitHub Actions 时，在本机执行：
 
 ```powershell
 .\scripts\build_installer.ps1
 ```
 
-Build a specific installer version:
+脚本会调用 `build_exe.ps1`（PyInstaller）并用 Inno Setup 生成 `installer\output\PianoConvertSetup-<version>.exe`。打包前需确保 `models\` 下已有 Kong checkpoint（见上文复制命令）。
 
-```powershell
-.\scripts\build_installer.ps1 -Version 0.1.0
-```
+### 模型权重与 CI
 
-The installer is written to:
+`models/*.pth` 已加入 `.gitignore`（约 164 MB），不会随 git 推送。`app.spec` 打包时需要该文件，因此：
 
-```text
-installer/PianoConvertSetup-0.1.0.exe
-```
-
-## Publish A GitHub Release
-
-GitHub Actions can build the same offline Windows installer and attach it to a Release. Push a version tag to start a release build:
-
-```powershell
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-You can also start `Release Installer` manually from the GitHub Actions tab and enter a version such as `v0.1.0`.
-
-The workflow downloads the model checkpoint during the build, runs tests, builds the PyInstaller app, compiles the Inno Setup installer, uploads it as a workflow artifact, and publishes `PianoConvertSetup-<version>.exe` to GitHub Releases.
-
-The installer is large because it bundles Python runtime files, PyTorch, PySide6, and the transcription model checkpoint.
-
-## Notes
-
-- CUDA is used when available and selected.
-- CPU mode is slower but useful as a fallback.
-- Generated MIDI files are ignored by git through `Output/`.
-- Installer build artifacts are ignored by git through `build/`, `dist/`, and `installer/`.
-- The UI reads note events directly for piano-roll preview and writes MIDI from the same event data, keeping preview and export aligned.
+- **本地**：`scripts\build_installer.ps1` 使用本机 `models\*.pth`，按上文从 `E:\PianoConvert\_internal\piano_transcription_inference_data\` 复制即可。
+- **GitHub Actions**：runner 上没有 checkpoint 时，PyInstaller 步骤会失败。在提供权重之前，CI 安装包 job 无法成功。可选做法包括：将 `.pth` 作为 Release 资产上传后在 workflow 中下载到 `models/`，或使用 `actions/cache` 缓存已上传的权重——当前 workflow **尚未**配置自动下载；需自行补充下载步骤或把文件放入 `models/` 后再触发构建。

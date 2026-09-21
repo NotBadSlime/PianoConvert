@@ -1,13 +1,9 @@
-.superpowers/
 .venv/
-.idea/
 __pycache__/
 *.pyc
 .pytest_cache/
-Input/
-Output/
-piano_transcription_inference_data/*.pth
 build/
 dist/
-installer/
-*.spec.bak
+installer/output/
+Output/
+models/*.pth
