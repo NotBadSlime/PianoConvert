@@ -3,7 +3,7 @@ import sys
 import pytest
 from pathlib import Path
 
-from app.paths import history_path, make_output_dir, model_checkpoint, output_root
+from app.paths import history_path, make_output_dir, model_checkpoint, output_root, safe_stem
 
 
 def test_output_root_ends_with_pianoconvert_output(tmp_path, monkeypatch):
@@ -22,6 +22,24 @@ def test_make_output_dir_uses_stem_and_timestamp(tmp_path, monkeypatch):
     monkeypatch.setattr("app.paths._now_stamp", lambda: "20260102-030405")
     folder = make_output_dir(Path("song name.mp3"))
     assert folder.name == "song name_20260102-030405"
+    assert folder.is_dir()
+
+
+def test_safe_stem_strips_windows_illegal_chars():
+    raw = '"你永远无法回到过去" | 《Charm and Rules》 - 1.studio_video.mp3'
+    out = safe_stem(raw)
+    for ch in '<>:"/\\|?*':
+        assert ch not in out
+    assert out
+    assert len(out) <= 80
+
+
+def test_make_output_dir_accepts_netease_filename(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.paths.output_root", lambda: tmp_path)
+    monkeypatch.setattr("app.paths._now_stamp", lambda: "20260102-030405")
+    folder = make_output_dir(Path('"bad|name".mp3'))
+    assert "|" not in folder.name
+    assert '"' not in folder.name
     assert folder.is_dir()
 
 

@@ -12,6 +12,7 @@ from app.keyboard_score import (
     KeyboardScoreError,
     score_file_to_keyboard_text,
 )
+from app.paths import safe_stem
 from app.score_io import midi_to_musicxml
 
 AUDIO_SUFFIXES = {".mp3", ".wav", ".flac", ".ogg", ".m4a"}
@@ -45,15 +46,21 @@ def humanize_error(exc: BaseException) -> str:
         return "显存不足或 GPU 出错，可关闭其他占用显卡的程序后重试"
     if "cannot open" in low or "failed to load" in low or "nobyteserror" in low or "soundfile" in low:
         return "无法读取这个音频文件"
+    if isinstance(exc, ModuleNotFoundError) or "no module named" in low:
+        return "安装包不完整，请安装官网最新版后重试"
     return f"转录失败：{text[:180]}"
 
 
 def _stamp_dir(output_root: Path, source: Path) -> Path:
     from datetime import datetime
 
-    folder = output_root / f"{source.stem}_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    folder = output_root / f"{safe_stem(source.name)}_{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     folder.mkdir(parents=True, exist_ok=True)
     return folder
+
+
+def _work_name(source: Path) -> str:
+    return f"{safe_stem(source.name)}{source.suffix.lower()}"
 
 
 def _write_keyboard(midi_or_score: Path, dest: Path, title: str) -> None:
@@ -78,9 +85,11 @@ def run(
     root = output_root or default_root()
     root.mkdir(parents=True, exist_ok=True)
     folder = _stamp_dir(root, source)
-    midi_path = folder / f"{source.stem}.mid"
-    xml_path = folder / f"{source.stem}.musicxml"
-    keyboard_path = folder / f"{source.stem}_键盘谱.txt"
+    work = safe_stem(source.name)
+    midi_path = folder / f"{work}.mid"
+    xml_path = folder / f"{work}.musicxml"
+    keyboard_path = folder / f"{work}_键盘谱.txt"
+    audio_copy = folder / _work_name(source)
     progress = on_progress or (lambda _m, _p: None)
 
     def _cancelled_result(err: str = "") -> ConvertResult:
@@ -97,8 +106,9 @@ def run(
         if cancel.is_set():
             return _cancelled_result()
         progress("读取音频", 0.1)
+        shutil.copy2(source, audio_copy)
         progress("转录", 0.3)
-        engines[kind].transcribe(source, midi_path, cancel, progress)
+        engines[kind].transcribe(audio_copy, midi_path, cancel, progress)
         if cancel.is_set():
             return _cancelled_result()
         progress("写入 MIDI", 0.7)
@@ -116,7 +126,7 @@ def run(
             errors.append(f"谱面导出失败：{exc}"[:200])
         try:
             progress("写入键盘谱", 0.92)
-            _write_keyboard(midi_path, keyboard_path, source.stem)
+            _write_keyboard(midi_path, keyboard_path, work)
         except Exception as exc:  # noqa: BLE001
             if isinstance(exc, CancelledError):
                 raise
@@ -153,13 +163,14 @@ def run_score(
     root = output_root or default_root()
     root.mkdir(parents=True, exist_ok=True)
     folder = _stamp_dir(root, source)
-    copied = folder / source.name
-    keyboard_path = folder / f"{source.stem}_键盘谱.txt"
+    work = safe_stem(source.name)
+    copied = folder / _work_name(source)
+    keyboard_path = folder / f"{work}_键盘谱.txt"
     if suffix in {".mid", ".midi"}:
         midi_path = copied
-        xml_path = folder / f"{source.stem}.musicxml"
+        xml_path = folder / f"{work}.musicxml"
     else:
-        midi_path = folder / f"{source.stem}.mid"
+        midi_path = folder / f"{work}.mid"
         xml_path = copied
     kind = "score"
     progress = on_progress or (lambda _m, _p: None)
@@ -182,7 +193,7 @@ def run_score(
         if cancel.is_set():
             return _cancelled_result()
         progress("写入键盘谱", 0.6)
-        _write_keyboard(copied, keyboard_path, source.stem)
+        _write_keyboard(copied, keyboard_path, work)
         progress("完成", 1.0)
         return _pack("success", "")
     except CancelledError:

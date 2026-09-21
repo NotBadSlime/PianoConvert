@@ -3,13 +3,13 @@ import importlib
 from pathlib import Path
 
 import music21
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 root = Path(SPECPATH)
 music21_dir = Path(music21.__file__).resolve().parent
 
 # music21 is shipped as source (datas) and excluded from Analysis, so PyInstaller
-# never sees its imports. Bundle its declared runtime deps explicitly.
+# never sees its imports. Bundle declared runtime deps explicitly.
 MUSIC21_RUNTIME_PACKAGES = [
     "webcolors",
     "jsonpickle",
@@ -24,6 +24,20 @@ MUSIC21_DATAS_PACKAGES = [
     "more_itertools",
     "chardet",
 ]
+# setuptools 84+ dropped pkg_resources; resampy still needs it. Collect both.
+COLLECT_ALL_PACKAGES = [
+    "setuptools",
+    "pkg_resources",
+    "resampy",
+    "librosa",
+    "pretty_midi",
+    "audioread",
+    "soundfile",
+    "pooch",
+    "decorator",
+    "soxr",
+    "lazy_loader",
+]
 
 
 def _package_dir(modname: str) -> Path:
@@ -34,9 +48,14 @@ def _package_dir(modname: str) -> Path:
 
 hiddenimports = [
     "audioread.ffdec",
+    "pkg_resources",
+    "setuptools",
+    "resampy",
+    "resampy.filters",
     "app",
     "app.convert",
     "app.device",
+    "app.frozen_smoke",
     "app.history",
     "app.keyboard_score",
     "app.paths",
@@ -71,18 +90,28 @@ for _pkg in MUSIC21_DATAS_PACKAGES:
     datas.append((str(_package_dir(_pkg)), _pkg))
 datas += collect_data_files("torchlibrosa")
 datas += collect_data_files("basic_pitch")
+datas += collect_data_files("resampy")
+
+binaries = []
+for _pkg in COLLECT_ALL_PACKAGES:
+    try:
+        pkg_datas, pkg_binaries, pkg_hidden = collect_all(_pkg)
+    except Exception:
+        continue
+    datas += pkg_datas
+    binaries += pkg_binaries
+    hiddenimports += pkg_hidden
 
 a = Analysis(
     ["app/__main__.py"],
     pathex=[str(root)],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[str(root / "packaging" / "hooks")],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        "tests",
         "pytest",
         "pygments",
         "IPython",

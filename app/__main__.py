@@ -5,6 +5,13 @@ from app.ui.styles import APP_QSS
 
 
 def main() -> None:
+    import sys
+
+    if "--smoke" in sys.argv:
+        from app.frozen_smoke import run_smoke
+
+        raise SystemExit(run_smoke())
+
     app = QApplication([])
     app.setStyleSheet(APP_QSS)
     win = MainWindow()

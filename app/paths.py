@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
 CHECKPOINT_NAME = "note_F1=0.9677_pedal_F1=0.9186.pth"
+_UNSAFE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
 def repo_root() -> Path:
@@ -13,6 +15,13 @@ def repo_root() -> Path:
 
 def _now_stamp() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def safe_stem(name: str, max_len: int = 80) -> str:
+    text = Path(name).stem
+    text = _UNSAFE.sub("_", text)
+    text = re.sub(r"_+", "_", text).strip(" ._")
+    return (text or "audio")[:max_len]
 
 
 def output_root() -> Path:
@@ -25,7 +34,7 @@ def history_path() -> Path:
 
 
 def make_output_dir(source: Path) -> Path:
-    folder = output_root() / f"{source.stem}_{_now_stamp()}"
+    folder = output_root() / f"{safe_stem(source.name)}_{_now_stamp()}"
     folder.mkdir(parents=True, exist_ok=True)
     return folder
 

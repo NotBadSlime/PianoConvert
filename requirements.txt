@@ -10,5 +10,6 @@ onnxruntime>=1.17
 piano_transcription_inference>=0.0.5
 torch
 torchaudio
+setuptools>=65,<81
 pytest>=8.0
 pyinstaller>=6.0

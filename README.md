@@ -9,7 +9,7 @@ PianoConvert 是给 Windows 用户用的离线小工具。你可以把一首歌�
 ## 1. 安装和打开
 
 1. 打开 [下载页面](https://github.com/NotBadSlime/PianoConvert/releases)。
-2. 下载最新的 `PianoConvertSetup-0.3.1.exe`。
+2. 下载最新的 `PianoConvertSetup-0.3.2.exe`。
 3. 双击安装包，按提示下一步（可勾选桌面快捷方式）。
 4. 从开始菜单或桌面打开 **PianoConvert**。
 

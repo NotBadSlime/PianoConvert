@@ -57,6 +57,15 @@ def test_success_writes_midi_and_musicxml(tmp_path):
     assert result.folder.name.startswith("tune_")
 
 
+def test_unicode_filename_writes(tmp_path):
+    src = tmp_path / "你永远无法回到过去.mp3"
+    src.write_bytes(b"xx")
+    result = run(src, "piano", engines={"piano": FakeEngine()}, cancel=Event(), output_root=tmp_path)
+    assert result.status == "success"
+    assert result.midi_path.exists()
+    assert "你永远无法回到过去" in result.folder.name
+
+
 def test_partial_when_musicxml_fails(tmp_path, monkeypatch):
     src = tmp_path / "tune.wav"
     src.write_bytes(b"xx")
