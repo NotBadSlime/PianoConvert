@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pretty_midi
-from music21 import converter
 
 
 def write_notes_midi(
@@ -24,6 +23,8 @@ def write_notes_midi(
 
 
 def midi_to_musicxml(midi_path: Path, dest: Path) -> None:
+    from music21 import converter
+
     score = converter.parse(str(midi_path))
     dest.parent.mkdir(parents=True, exist_ok=True)
     written = score.write("musicxml", fp=str(dest))
