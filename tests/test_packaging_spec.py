@@ -13,6 +13,7 @@ def test_app_spec_bundles_music21_runtime_deps():
         "pkg_resources",
         "setuptools",
         "resampy",
+        "homr",
     ):
         assert name in spec
     assert "app.keyboard_score" in spec
@@ -27,6 +28,7 @@ def test_smoke_import_list_covers_runtime_stack():
         "librosa",
         "music21",
         "basic_pitch",
+        "homr",
         "pretty_midi",
     ):
         assert name in names

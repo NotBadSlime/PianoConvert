@@ -27,12 +27,14 @@ from PySide6.QtWidgets import (
 from app.convert import AUDIO_SUFFIXES
 from app.history import HistoryItem, append_item, load_items
 from app.keyboard_score import SCORE_SUFFIXES
+from app.pdf_omr import PDF_SUFFIXES
 from app.ui.styles import APP_QSS
 
-KIND_LABELS = {"piano": "钢琴", "other": "其他乐器", "score": "键盘谱"}
+KIND_LABELS = {"piano": "钢琴", "other": "其他乐器", "score": "键盘谱", "pdf": "PDF"}
 STATUS_LABELS = {"success": "成功", "partial": "部分成功", "failed": "失败"}
 AUDIO_FILTER = "音频文件 (*.mp3 *.wav *.flac *.ogg *.m4a)"
 SCORE_FILTER = "乐谱文件 (*.mid *.midi *.musicxml *.xml)"
+PDF_FILTER = "PDF 乐谱 (*.pdf)"
 
 
 def default_engines():
@@ -48,13 +50,21 @@ def _first_dropped_path(event: QDragEnterEvent | QDropEvent) -> Path | None:
         return None
     for url in mime.urls():
         path = Path(url.toLocalFile())
-        if path.suffix.lower() in AUDIO_SUFFIXES | SCORE_SUFFIXES:
+        if path.suffix.lower() in AUDIO_SUFFIXES | SCORE_SUFFIXES | PDF_SUFFIXES:
             return path
     return None
 
 
 def _is_score_path(path: Path | None) -> bool:
     return path is not None and path.suffix.lower() in SCORE_SUFFIXES
+
+
+def _is_pdf_path(path: Path | None) -> bool:
+    return path is not None and path.suffix.lower() in PDF_SUFFIXES
+
+
+def _direct_score_path(path: Path | None) -> bool:
+    return _is_score_path(path) or _is_pdf_path(path)
 
 
 def _format_time(raw: str) -> str:
@@ -200,6 +210,10 @@ class MainWindow(QMainWindow):
 
             if kind == "score":
                 return run_score(source, cancel, output_root=None, on_progress=on_progress)
+            if kind == "pdf":
+                from app.convert import run_pdf
+
+                return run_pdf(source, cancel, output_root=None, on_progress=on_progress)
             return convert_run(
                 source,
                 kind,
@@ -224,19 +238,22 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         hero = QLabel("把音频或乐谱转成琴谱")
         hero.setObjectName("hero")
-        subtitle = QLabel("音频生成 MIDI、MusicXML 和原神键盘谱；也可直接选 MIDI / MusicXML")
+        subtitle = QLabel("音频、MIDI、MusicXML 或 PDF 五线谱，生成原神键盘谱")
         subtitle.setObjectName("muted")
 
         self.pick_button = QPushButton("选择音频文件")
         self.pick_button.clicked.connect(self._choose_file)
         self.pick_score_button = QPushButton("选择 MIDI / MusicXML")
         self.pick_score_button.clicked.connect(self._choose_score_file)
+        self.pick_pdf_button = QPushButton("选择 PDF 乐谱")
+        self.pick_pdf_button.clicked.connect(self._choose_pdf_file)
         self.file_label = QLabel("尚未选择文件")
         self.file_label.setObjectName("muted")
 
         file_row = QHBoxLayout()
         file_row.addWidget(self.pick_button)
         file_row.addWidget(self.pick_score_button)
+        file_row.addWidget(self.pick_pdf_button)
         file_row.addWidget(self.file_label, 1)
 
         self.kind_label = QLabel("乐器类型")
@@ -248,6 +265,10 @@ class MainWindow(QMainWindow):
         kind_row.addWidget(self.other_radio)
         kind_row.addStretch(1)
 
+        self.pdf_note = QLabel("PDF 识别准确度有限：清晰的印刷五线谱较好，扫描件、手写、简谱、吉他谱经常认错。请对照原谱。第一次使用需要联网下载识别模型。")
+        self.pdf_note.setObjectName("note")
+        self.pdf_note.setWordWrap(True)
+        self.pdf_note.hide()
         self.start_button = QPushButton("开始转换")
         self.start_button.setObjectName("primary")
         self.start_button.setEnabled(False)
@@ -268,6 +289,7 @@ class MainWindow(QMainWindow):
         card_layout.addLayout(file_row)
         card_layout.addWidget(self.kind_label)
         card_layout.addLayout(kind_row)
+        card_layout.addWidget(self.pdf_note)
         card_layout.addWidget(self.start_button)
         card_layout.addWidget(self.progress_bar)
         card_layout.addWidget(self.status_label)
@@ -326,13 +348,14 @@ class MainWindow(QMainWindow):
             self.start_button.setEnabled(True)
 
     def _apply_source_mode(self) -> None:
-        score = _is_score_path(self._source)
-        self.kind_label.setVisible(not score)
-        self.piano_radio.setVisible(not score)
-        self.other_radio.setVisible(not score)
+        direct = _direct_score_path(self._source)
+        self.kind_label.setVisible(not direct)
+        self.piano_radio.setVisible(not direct)
+        self.other_radio.setVisible(not direct)
+        self.pdf_note.setVisible(_is_pdf_path(self._source))
         if self._busy:
             return
-        self.start_button.setText("转换为键盘谱" if score else "开始转换")
+        self.start_button.setText("转换为键盘谱" if direct else "开始转换")
 
     def _choose_file(self) -> None:
         if self._busy:
@@ -345,6 +368,13 @@ class MainWindow(QMainWindow):
         if self._busy:
             return
         chosen, _ = QFileDialog.getOpenFileName(self, "选择 MIDI / MusicXML", "", SCORE_FILTER)
+        if chosen:
+            self.set_source_file(Path(chosen))
+
+    def _choose_pdf_file(self) -> None:
+        if self._busy:
+            return
+        chosen, _ = QFileDialog.getOpenFileName(self, "选择 PDF 乐谱", "", PDF_FILTER)
         if chosen:
             self.set_source_file(Path(chosen))
 
@@ -367,12 +397,18 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(True)
         self.pick_button.setEnabled(False)
         self.pick_score_button.setEnabled(False)
+        self.pick_pdf_button.setEnabled(False)
         self.piano_radio.setEnabled(False)
         self.other_radio.setEnabled(False)
         self.progress_bar.setValue(0)
         self.status_label.setText("准备中")
 
-        kind = "score" if _is_score_path(self._source) else ("piano" if self.piano_radio.isChecked() else "other")
+        if _is_pdf_path(self._source):
+            kind = "pdf"
+        elif _is_score_path(self._source):
+            kind = "score"
+        else:
+            kind = "piano" if self.piano_radio.isChecked() else "other"
         self._thread = QThread(self)
         self._worker = ConvertWorker(self._convert_fn, self._source, kind, self._cancel)
         self._worker.moveToThread(self._thread)
@@ -420,6 +456,7 @@ class MainWindow(QMainWindow):
         self._cancel = None
         self.pick_button.setEnabled(True)
         self.pick_score_button.setEnabled(True)
+        self.pick_pdf_button.setEnabled(True)
         self.piano_radio.setEnabled(True)
         self.other_radio.setEnabled(True)
         self._apply_source_mode()

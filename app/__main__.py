@@ -11,6 +11,11 @@ def main() -> None:
         from app.frozen_smoke import run_smoke
 
         raise SystemExit(run_smoke())
+    if "--homr" in sys.argv:
+        from app.pdf_omr import homr_entry
+
+        homr_entry(sys.argv[sys.argv.index("--homr") + 1])
+        return
 
     app = QApplication([])
     app.setStyleSheet(APP_QSS)

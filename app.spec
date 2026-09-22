@@ -75,6 +75,12 @@ hiddenimports = [
     "torchlibrosa",
     "librosa",
     "soundfile",
+    "homr",
+    "homr.main",
+    "musicxml",
+    "cv2",
+    "pypdfium2",
+    "rapidocr",
 ]
 hiddenimports += MUSIC21_RUNTIME_PACKAGES
 
@@ -93,6 +99,15 @@ datas += collect_data_files("basic_pitch")
 datas += collect_data_files("resampy")
 
 binaries = []
+for _pkg in ("homr", "musicxml", "rapidocr", "pypdfium2"):
+    try:
+        pkg_datas, pkg_binaries, pkg_hidden = collect_all(_pkg)
+    except Exception:
+        continue
+    datas += pkg_datas
+    binaries += pkg_binaries
+    hiddenimports += pkg_hidden
+
 for _pkg in COLLECT_ALL_PACKAGES:
     try:
         pkg_datas, pkg_binaries, pkg_hidden = collect_all(_pkg)

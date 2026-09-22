@@ -15,6 +15,8 @@ REQUIRED_IMPORTS = (
     ("basic_pitch", "basic_pitch"),
     ("onnxruntime", "onnxruntime"),
     ("torch", "torch"),
+    ("homr", "homr"),
+    ("musicxml", "musicxml"),
 )
 
 

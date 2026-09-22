@@ -72,6 +72,18 @@ def test_score_file_hides_instrument_and_changes_start(tmp_path):
     assert win.start_button.isEnabled() is True
 
 
+def test_pdf_file_shows_accuracy_note(tmp_path):
+    app = QApplication.instance() or QApplication([])
+    win = MainWindow()
+    src = tmp_path / "a.pdf"
+    src.write_bytes(b"%PDF")
+    win.set_source_file(src)
+    assert win.piano_radio.isHidden() is True
+    assert win.pdf_note.isHidden() is False
+    assert "准确度有限" in win.pdf_note.text()
+    assert win.start_button.text() == "转换为键盘谱"
+
+
 def test_finished_resets_ui_if_history_save_fails(tmp_path, monkeypatch):
     def boom(*_args, **_kwargs):
         raise OSError("disk full")
