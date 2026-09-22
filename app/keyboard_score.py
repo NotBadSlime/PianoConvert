@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +13,7 @@ SNAP_UP = {1: 2, 3: 4, 6: 7, 8: 9, 10: 11}
 C3 = 48
 B5 = 83
 CLUSTER_SEC = 0.050
+GRID_QUARTERS = 0.5
 
 PITCH_TO_NUM = {
     48: "-1",
@@ -61,7 +63,7 @@ PITCH_TO_KEY = {
 }
 
 MIDI_SUFFIXES = {".mid", ".midi"}
-MUSICXML_SUFFIXES = {".musicxml", ".xml"}
+MUSICXML_SUFFIXES = {".musicxml", ".xml", ".mxl"}
 SCORE_SUFFIXES = MIDI_SUFFIXES | MUSICXML_SUFFIXES
 
 
@@ -166,11 +168,134 @@ def _group_token(pitches: list[int], kind: str) -> str:
     return "(" + "".join(tokens) + ")"
 
 
-def _gap_spaces(gap: float, beat_sec: float) -> str:
+@dataclass(frozen=True)
+class MeterMark:
+    quarters: float
+    numerator: int
+    denominator: int
+
+
+def quarters_per_bar(numerator: int, denominator: int) -> float:
+    denom = denominator or 4
+    return max(1.0, float(numerator) * 4.0 / float(denom))
+
+
+def _prepare_tempos(tempos: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    cleaned: list[tuple[float, float]] = []
+    for raw_time, raw_bpm in sorted(tempos, key=lambda item: item[0]):
+        bpm = float(raw_bpm)
+        if bpm <= 0:
+            continue
+        start = max(0.0, float(raw_time))
+        if cleaned and abs(cleaned[-1][0] - start) < 1e-6:
+            cleaned[-1] = (cleaned[-1][0], bpm)
+        else:
+            cleaned.append((start, bpm))
+    if not cleaned or cleaned[0][0] > 1e-6:
+        cleaned.insert(0, (0.0, 120.0))
+    return cleaned
+
+
+def _prepare_meters(meters: list[MeterMark]) -> list[MeterMark]:
+    ordered = sorted(meters, key=lambda item: item.quarters)
+    cleaned: list[MeterMark] = []
+    for meter in ordered:
+        start = max(0.0, float(meter.quarters))
+        mark = MeterMark(start, int(meter.numerator), int(meter.denominator or 4))
+        if cleaned and abs(cleaned[-1].quarters - start) < 1e-6:
+            cleaned[-1] = mark
+        else:
+            cleaned.append(mark)
+    if not cleaned or cleaned[0].quarters > 1e-6:
+        cleaned.insert(0, MeterMark(0.0, 4, 4))
+    return cleaned
+
+
+def seconds_to_quarters(t: float, tempos: list[tuple[float, float]]) -> float:
+    points = _prepare_tempos(tempos)
+    t = max(0.0, t)
+    quarters = 0.0
+    for index, (start, bpm) in enumerate(points):
+        end = points[index + 1][0] if index + 1 < len(points) else float("inf")
+        if t <= start + 1e-12:
+            break
+        seg_end = min(t, end)
+        if seg_end > start:
+            quarters += (seg_end - start) * (bpm / 60.0)
+    return quarters
+
+
+def quarters_to_seconds(q: float, tempos: list[tuple[float, float]]) -> float:
+    points = _prepare_tempos(tempos)
+    remaining = max(0.0, q)
+    for index, (start, bpm) in enumerate(points):
+        end = points[index + 1][0] if index + 1 < len(points) else float("inf")
+        span = float("inf") if end == float("inf") else (end - start) * (bpm / 60.0)
+        if remaining <= span + 1e-9:
+            return start + remaining * (60.0 / bpm)
+        remaining -= span
+    return points[-1][0]
+
+
+def bpm_at(t: float, tempos: list[tuple[float, float]]) -> float:
+    bpm = 120.0
+    for start, value in _prepare_tempos(tempos):
+        if start <= t + 1e-8:
+            bpm = value
+        else:
+            break
+    return bpm
+
+
+def _meter_at(q: float, meters: list[MeterMark]) -> MeterMark:
+    current = meters[0]
+    for meter in meters:
+        if meter.quarters <= q + 1e-8:
+            current = meter
+        else:
+            break
+    return current
+
+
+def _gap_spaces(gap_quarters: float) -> str:
     spaces = 1
-    if beat_sec > 0 and gap >= 0.5 * beat_sec:
-        spaces += min(4, int(gap / beat_sec))
+    if gap_quarters >= 0.5:
+        spaces += min(4, int(gap_quarters + 1e-9))
     return " " * spaces
+
+
+def _bars_until(last_q: float, meters: list[MeterMark]) -> list[tuple[float, float, MeterMark]]:
+    prepared = _prepare_meters(meters)
+    bars: list[tuple[float, float, MeterMark]] = []
+    q = 0.0
+    for _ in range(100000):
+        if q > last_q + 1e-8:
+            break
+        meter = _meter_at(q, prepared)
+        length = quarters_per_bar(meter.numerator, meter.denominator)
+        end = q + length
+        for candidate in prepared:
+            if q + 1e-6 < candidate.quarters < end - 1e-6:
+                end = candidate.quarters
+                break
+        bars.append((q, end, meter))
+        if end <= q:
+            break
+        q = end
+    return bars
+
+
+def _change_mark(prev: MeterMark | None, meter: MeterMark, prev_bpm: float | None, bpm: float) -> str:
+    if prev is None or prev_bpm is None:
+        return ""
+    parts: list[str] = []
+    if (meter.numerator, meter.denominator) != (prev.numerator, prev.denominator):
+        parts.append(f"{meter.numerator}/{meter.denominator}")
+    if abs(bpm - prev_bpm) >= 0.5:
+        parts.append(f"{int(round(bpm))}拍")
+    if not parts:
+        return ""
+    return "〔" + "·".join(parts) + "〕"
 
 
 def _join_bars(bars: list[str]) -> str:
@@ -186,32 +311,64 @@ def _join_bars(bars: list[str]) -> str:
     return "\n".join(lines)
 
 
+def snap_quarter(q: float) -> float:
+    return math.floor(q / GRID_QUARTERS + 0.5) * GRID_QUARTERS
+
+
+def quantize_onsets(located: list[tuple[float, list[int]]]) -> list[tuple[float, list[int]]]:
+    merged: dict[float, list[int]] = {}
+    for q, pitches in located:
+        key = round(snap_quarter(q), 6)
+        bucket = merged.setdefault(key, [])
+        for pitch in pitches:
+            if pitch not in bucket:
+                bucket.append(pitch)
+    return [(q, sorted(merged[q])) for q in sorted(merged)]
+
+
+def _constant_timeline(beat_sec: float, beats_per_bar: int) -> tuple[list[tuple[float, float]], list[MeterMark]]:
+    bpm = 60.0 / beat_sec if beat_sec > 0 else 120.0
+    return [(0.0, bpm)], [MeterMark(0.0, max(1, int(beats_per_bar)), 4)]
+
+
 def render_bodies(
     clusters: list[tuple[float, list[int]]],
     beat_sec: float,
     beats_per_bar: int,
+    tempos: list[tuple[float, float]] | None = None,
+    meters: list[MeterMark] | None = None,
 ) -> tuple[str, str]:
     if not clusters:
         return "", ""
-    bar_sec = max(beat_sec * max(beats_per_bar, 1), 1e-6)
-    bars: dict[int, list[tuple[float, list[int]]]] = defaultdict(list)
-    for start, pitches in clusters:
-        idx = int(start / bar_sec + 1e-9)
-        bars[idx].append((start, pitches))
-    first = min(bars)
-    last = max(bars)
+    if tempos is None or meters is None:
+        tempos, meters = _constant_timeline(beat_sec, beats_per_bar)
+    located = quantize_onsets([(seconds_to_quarters(start, tempos), pitches) for start, pitches in clusters])
+    last_q = max(item[0] for item in located)
+    bars = _bars_until(last_q, meters)
+    grouped: dict[int, list[tuple[float, list[int]]]] = defaultdict(list)
+    for q, pitches in located:
+        for index, (start, end, _meter) in enumerate(bars):
+            if start - 1e-8 <= q < end - 1e-9 or index == len(bars) - 1:
+                grouped[index].append((q, pitches))
+                break
     num_bars: list[str] = []
     key_bars: list[str] = []
-    for idx in range(first, last + 1):
-        events = bars.get(idx, [])
-        num_parts: list[str] = []
-        key_parts: list[str] = []
-        prev: float | None = None
-        for start, pitches in events:
-            prefix = "" if prev is None else _gap_spaces(start - prev, beat_sec)
+    prev_meter: MeterMark | None = None
+    prev_bpm: float | None = None
+    for index, (start, _end, meter) in enumerate(bars):
+        bpm = bpm_at(quarters_to_seconds(start, tempos), tempos)
+        mark = _change_mark(prev_meter, meter, prev_bpm, bpm)
+        prev_meter = meter
+        prev_bpm = bpm
+        events = sorted(grouped.get(index, []), key=lambda item: item[0])
+        num_parts: list[str] = [mark]
+        key_parts: list[str] = [mark]
+        prev_q: float | None = None
+        for q, pitches in events:
+            prefix = "" if prev_q is None else _gap_spaces(q - prev_q)
             num_parts.append(prefix + _group_token(pitches, "num"))
             key_parts.append(prefix + _group_token(pitches, "key"))
-            prev = start
+            prev_q = q
         num_bars.append("".join(num_parts))
         key_bars.append("".join(key_parts))
     return _join_bars(num_bars), _join_bars(key_bars)
@@ -222,35 +379,39 @@ def render_score(
     beat_sec: float,
     beats_per_bar: int,
     title: str,
+    tempos: list[tuple[float, float]] | None = None,
+    meters: list[MeterMark] | None = None,
 ) -> str:
-    num_body, key_body = render_bodies(clusters, beat_sec, beats_per_bar)
+    num_body, key_body = render_bodies(clusters, beat_sec, beats_per_bar, tempos, meters)
     return (
         f"# {title}\n"
-        f"# 1=C  原神风物之诗琴  C3–C6 三排白键\n\n"
+        f"# 1=C  原神风物之诗琴  C3–B5 三排白键\n\n"
         f"【数字谱】\n{num_body}\n\n"
         f"【键盘谱】\n{key_body}\n"
     )
 
 
-def _tempo_and_meter(pm: pretty_midi.PrettyMIDI) -> tuple[float, int]:
-    beat_sec = 0.5
+def _timeline_from_midi(pm: pretty_midi.PrettyMIDI) -> tuple[list[tuple[float, float]], list[MeterMark]]:
+    tempos: list[tuple[float, float]] = []
     try:
-        _times, tempos = pm.get_tempo_changes()
-        if len(tempos):
-            bpm = float(tempos[0])
-            if bpm > 0:
-                beat_sec = 60.0 / bpm
+        times, values = pm.get_tempo_changes()
+        tempos = [(float(t), float(bpm)) for t, bpm in zip(times, values) if float(bpm) > 0]
     except Exception:  # noqa: BLE001
-        pass
-    beats_per_bar = 4
-    if pm.time_signature_changes:
-        ts = pm.time_signature_changes[0]
-        denom = ts.denominator or 4
-        beats_per_bar = max(1, int(ts.numerator * (4 / denom)))
-    return beat_sec, beats_per_bar
+        tempos = []
+    tempos = _prepare_tempos(tempos)
+    meters: list[MeterMark] = []
+    for ts in pm.time_signature_changes:
+        meters.append(
+            MeterMark(
+                seconds_to_quarters(float(ts.time), tempos),
+                int(ts.numerator),
+                int(ts.denominator or 4),
+            )
+        )
+    return tempos, _prepare_meters(meters)
 
 
-def notes_from_midi(path: Path) -> tuple[list[NoteEvent], float, int]:
+def notes_from_midi(path: Path) -> tuple[list[NoteEvent], list[tuple[float, float]], list[MeterMark]]:
     try:
         pm = pretty_midi.PrettyMIDI(str(path))
     except Exception as exc:  # noqa: BLE001
@@ -261,11 +422,34 @@ def notes_from_midi(path: Path) -> tuple[list[NoteEvent], float, int]:
             continue
         for n in inst.notes:
             notes.append(NoteEvent(int(n.pitch), float(n.start), float(n.end)))
-    beat_sec, beats = _tempo_and_meter(pm)
-    return notes, beat_sec, beats
+    tempos, meters = _timeline_from_midi(pm)
+    return notes, tempos, meters
 
 
-def notes_from_musicxml(path: Path) -> tuple[list[NoteEvent], float, int]:
+def _timeline_from_quarter_marks(
+    tempo_marks: list[tuple[float, float]],
+    meters: list[MeterMark],
+) -> list[tuple[float, float]]:
+    marks = sorted((max(0.0, q), bpm) for q, bpm in tempo_marks if bpm > 0)
+    if not marks or marks[0][0] > 1e-6:
+        marks.insert(0, (0.0, 120.0))
+    points: list[tuple[float, float]] = []
+    q_cursor = 0.0
+    t_cursor = 0.0
+    prev_bpm = 120.0
+    for q, bpm in marks:
+        if q > q_cursor:
+            t_cursor += (q - q_cursor) * 60.0 / prev_bpm
+            q_cursor = q
+        if points and abs(points[-1][0] - t_cursor) < 1e-6:
+            points[-1] = (points[-1][0], bpm)
+        else:
+            points.append((t_cursor, bpm))
+        prev_bpm = bpm
+    return _prepare_tempos(points)
+
+
+def notes_from_musicxml(path: Path) -> tuple[list[NoteEvent], list[tuple[float, float]], list[MeterMark]]:
     try:
         from music21 import chord, converter, note, tempo
     except Exception as exc:  # noqa: BLE001
@@ -274,49 +458,55 @@ def notes_from_musicxml(path: Path) -> tuple[list[NoteEvent], float, int]:
         score = converter.parse(str(path))
     except Exception as exc:  # noqa: BLE001
         raise KeyboardScoreError("无法读取这个乐谱文件") from exc
-    bpm = 120.0
-    marks = list(score.flatten().getElementsByClass(tempo.MetronomeMark))
-    if marks and getattr(marks[0], "number", None):
-        bpm = float(marks[0].number)
-    beat_sec = 60.0 / bpm if bpm > 0 else 0.5
-    beats_per_bar = 4
-    ts_list = list(score.flatten().getTimeSignatures())
-    if ts_list:
-        ts = ts_list[0]
-        denom = ts.denominator or 4
-        beats_per_bar = max(1, int(ts.numerator * (4 / denom)))
+    flat = score.flatten()
+    tempo_marks: list[tuple[float, float]] = []
+    for mark in flat.getElementsByClass(tempo.MetronomeMark):
+        if getattr(mark, "number", None):
+            tempo_marks.append((float(mark.offset), float(mark.number)))
+    meters = [
+        MeterMark(float(ts.offset), int(ts.numerator), int(ts.denominator or 4))
+        for ts in flat.getTimeSignatures()
+    ]
+    tempos = _timeline_from_quarter_marks(tempo_marks, meters)
     notes: list[NoteEvent] = []
-    for el in score.flatten().notes:
+    for el in flat.notes:
         try:
-            start = float(el.offset) * beat_sec
-            dur = float(el.quarterLength) * beat_sec
+            q = float(el.offset)
+            dur_q = float(el.quarterLength)
+            start = quarters_to_seconds(q, tempos)
+            end = quarters_to_seconds(q + dur_q, tempos)
         except Exception:  # noqa: BLE001
             continue
         if isinstance(el, chord.Chord):
             for p in el.pitches:
-                notes.append(NoteEvent(int(p.midi), start, start + dur))
+                notes.append(NoteEvent(int(p.midi), start, end))
         elif isinstance(el, note.Note) and el.pitch is not None:
-            notes.append(NoteEvent(int(el.pitch.midi), start, start + dur))
-    return notes, beat_sec, beats_per_bar
+            notes.append(NoteEvent(int(el.pitch.midi), start, end))
+    return notes, tempos, _prepare_meters(meters)
 
 
-def notes_to_text(notes: list[NoteEvent], beat_sec: float, beats_per_bar: int, title: str) -> str:
+def notes_to_text(
+    notes: list[NoteEvent],
+    tempos: list[tuple[float, float]],
+    meters: list[MeterMark],
+    title: str,
+) -> str:
     if not notes:
         raise KeyboardScoreError("没有可转换的音符")
     arranged = arrange_notes(notes)
     if not arranged:
         raise KeyboardScoreError("没有可转换的音符")
-    return render_score(arranged, beat_sec, beats_per_bar, title)
+    return render_score(arranged, 0.5, 4, title, tempos, meters)
 
 
 def midi_to_keyboard_text(path: Path, title: str) -> str:
-    notes, beat_sec, beats = notes_from_midi(path)
-    return notes_to_text(notes, beat_sec, beats, title)
+    notes, tempos, meters = notes_from_midi(path)
+    return notes_to_text(notes, tempos, meters, title)
 
 
 def musicxml_to_keyboard_text(path: Path, title: str) -> str:
-    notes, beat_sec, beats = notes_from_musicxml(path)
-    return notes_to_text(notes, beat_sec, beats, title)
+    notes, tempos, meters = notes_from_musicxml(path)
+    return notes_to_text(notes, tempos, meters, title)
 
 
 def score_file_to_keyboard_text(path: Path, title: str | None = None) -> str:

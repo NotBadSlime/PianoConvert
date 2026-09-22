@@ -37,7 +37,7 @@ from app.ui.styles import APP_QSS
 KIND_LABELS = {"piano": "钢琴", "other": "其他乐器", "score": "键盘谱", "pdf": "PDF"}
 STATUS_LABELS = {"success": "成功", "partial": "部分成功", "failed": "失败"}
 AUDIO_FILTER = "音频文件 (*.mp3 *.wav *.flac *.ogg *.m4a)"
-SCORE_FILTER = "乐谱文件 (*.mid *.midi *.musicxml *.xml)"
+SCORE_FILTER = "乐谱文件 (*.mid *.midi *.musicxml *.xml *.mxl)"
 PDF_FILTER = "PDF 乐谱 (*.pdf)"
 
 

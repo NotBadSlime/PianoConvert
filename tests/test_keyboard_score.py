@@ -61,6 +61,68 @@ def test_notes_80ms_apart_are_not_a_chord():
     assert len(arranged) == 2
 
 
+def test_sloppy_onsets_snap_onto_the_beat_for_keyboard_score():
+    notes = [
+        NoteEvent(60, 0.04, 0.4),
+        NoteEvent(64, 0.09, 0.4),
+        NoteEvent(62, 0.53, 0.9),
+        NoteEvent(64, 1.08, 1.4),
+        NoteEvent(65, 1.47, 1.9),
+    ]
+    text = render_score(arrange_notes(notes), beat_sec=0.5, beats_per_bar=4, title="slop")
+    num = text.split("【数字谱】")[1].split("【键盘谱】")[0].strip()
+    assert num.startswith("(13)  2  3  4")
+
+
+def test_eighth_notes_stay_separate():
+    notes = [NoteEvent(60, 0.0, 0.2), NoteEvent(64, 0.25, 0.45)]
+    text = render_score(arrange_notes(notes), beat_sec=0.5, beats_per_bar=4, title="eighth")
+    num = text.split("【数字谱】")[1].split("【键盘谱】")[0].strip()
+    assert num.startswith("1 3")
+
+
+def test_later_tempo_keeps_quarter_spacing_and_marks_bpm():
+    from app.keyboard_score import MeterMark, render_score
+
+    notes = [
+        NoteEvent(60, 0.0, 0.4),
+        NoteEvent(62, 0.5, 0.9),
+        NoteEvent(64, 1.0, 1.4),
+        NoteEvent(65, 1.5, 1.9),
+        NoteEvent(60, 2.0, 2.8),
+        NoteEvent(62, 3.0, 3.8),
+        NoteEvent(64, 4.0, 4.8),
+        NoteEvent(65, 5.0, 5.8),
+    ]
+    text = render_score(
+        arrange_notes(notes),
+        0.5,
+        4,
+        "tempo",
+        [(0.0, 120.0), (2.0, 60.0)],
+        [MeterMark(0.0, 4, 4)],
+    )
+    num = text.split("【数字谱】")[1].split("【键盘谱】")[0].strip()
+    assert num == "1  2  3  4 / 〔60拍〕1  2  3  4 /"
+
+
+def test_later_meter_starts_a_new_bar_length():
+    from app.keyboard_score import MeterMark, render_score
+
+    notes = [NoteEvent(p, i * 0.5, i * 0.5 + 0.4) for i, p in enumerate([60, 62, 64, 65, 67, 69, 71])]
+    text = render_score(
+        arrange_notes(notes),
+        0.5,
+        4,
+        "meter",
+        [(0.0, 120.0)],
+        [MeterMark(0.0, 4, 4), MeterMark(4.0, 3, 4)],
+    )
+    num = text.split("【数字谱】")[1].split("【键盘谱】")[0].strip()
+    assert "〔3/4〕" in num
+    assert num.startswith("1  2  3  4 / 〔3/4〕")
+
+
 def test_bar_layout_matches_between_number_and_key():
     notes = [
         NoteEvent(60, 0.0, 0.4),
