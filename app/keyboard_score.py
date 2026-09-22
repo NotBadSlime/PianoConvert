@@ -8,6 +8,35 @@ from typing import Sequence
 
 import pretty_midi
 
+
+def _enable_lenient_key_signatures() -> None:
+    """Some exported MIDI files store a key signature outside -7..+7 sharps/flats.
+    The notes are still usable; treat that meta event as C major instead of failing the file.
+    """
+    from mido.midifiles.meta import MetaSpec_key_signature, _key_signature_decode, signed
+
+    if getattr(MetaSpec_key_signature.decode, "_pianoconvert_lenient", False):
+        return
+    original = MetaSpec_key_signature.decode
+
+    def decode(self, message, data):
+        try:
+            original(self, message, data)
+            return
+        except Exception:
+            key = signed("byte", data[0]) if data else 0
+            mode = data[1] if len(data) > 1 else 0
+        key = max(-7, min(7, int(key)))
+        if (key, mode) not in _key_signature_decode:
+            key, mode = 0, 0
+        message.key = _key_signature_decode[(key, mode)]
+
+    decode._pianoconvert_lenient = True  # type: ignore[attr-defined]
+    MetaSpec_key_signature.decode = decode  # type: ignore[method-assign]
+
+
+_enable_lenient_key_signatures()
+
 WHITE_PCS = {0, 2, 4, 5, 7, 9, 11}
 SNAP_UP = {1: 2, 3: 4, 6: 7, 8: 9, 10: 11}
 C3 = 48

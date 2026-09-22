@@ -156,6 +156,30 @@ def test_midi_to_keyboard_text_headers(tmp_path):
     assert "1=C" in text
 
 
+def test_midi_with_illegal_key_signature_still_converts(tmp_path):
+    import mido
+
+    midi = tmp_path / "badkey.mid"
+    mid = mido.MidiFile()
+    track = mido.MidiTrack()
+    mid.tracks.append(track)
+    track.append(mido.MetaMessage("set_tempo", tempo=500000, time=0))
+    track.append(mido.MetaMessage("key_signature", key="C", time=0))
+    track.append(mido.Message("note_on", note=60, velocity=80, time=0))
+    track.append(mido.Message("note_off", note=60, velocity=80, time=480))
+    track.append(mido.MetaMessage("end_of_track", time=0))
+    mid.save(midi)
+    raw = bytearray(midi.read_bytes())
+    marker = bytes([0xFF, 0x59, 0x02])
+    index = raw.find(marker)
+    assert index >= 0
+    raw[index + 3] = 14
+    midi.write_bytes(raw)
+    text = midi_to_keyboard_text(midi, title="badkey")
+    assert "【数字谱】" in text
+    assert text.split("【数字谱】")[1].split("【键盘谱】")[0].strip().startswith("1")
+
+
 def test_empty_midi_raises(tmp_path):
     midi = tmp_path / "empty.mid"
     _write_midi(midi, [])
