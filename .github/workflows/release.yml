@@ -19,6 +19,9 @@ jobs:
         with:
           python-version: "3.10"
       - run: pip install -r requirements.txt
+      - run: pip install "setuptools>=65,<81"
+      - run: pip install --ignore-requires-python --no-deps homr==0.7.0
+      - run: pip install musicxml==1.4 "opencv-python-headless>=4.10,<4.13" "pypdfium2>=4,<6" "rapidocr>=3.7,<4"
       - run: pytest
         env:
           QT_QPA_PLATFORM: offscreen
