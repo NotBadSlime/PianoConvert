@@ -15,7 +15,7 @@ PianoConvert 是一个 Windows 小软件。你给它一首歌，或者一份现�
 ## 1. 怎么安装、怎么打开
 
 1. 打开 [下载页面](https://github.com/NotBadSlime/PianoConvert/releases)。
-2. 下载最新的 `PianoConvertSetup-0.5.0.exe`。
+2. 下载最新的 `PianoConvertSetup-0.5.1.exe`。
 3. 双击安装包，一路下一步。想在桌面放图标，就勾上那个选项。
 4. 从开始菜单或桌面打开 **PianoConvert**。
 
