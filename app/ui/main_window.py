@@ -7,7 +7,7 @@ from threading import Event
 from uuid import uuid4
 
 from PySide6.QtCore import QEvent, QObject, QSize, QThread, Qt, Signal
-from PySide6.QtGui import QDragEnterEvent, QDropEvent
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -26,7 +26,10 @@ from PySide6.QtWidgets import (
 )
 
 from app.convert import AUDIO_SUFFIXES
+from app.engines.base import CancelledError
+from app.gpu_setup import explain_text, gpu_installed, install
 from app.history import HistoryItem, append_item, load_items
+from app.paths import app_icon_path
 from app.keyboard_score import SCORE_SUFFIXES
 from app.pdf_omr import PDF_SUFFIXES
 from app.ui.styles import APP_QSS
@@ -73,6 +76,26 @@ def _format_time(raw: str) -> str:
         return datetime.fromisoformat(raw).strftime("%Y-%m-%d %H:%M")
     except ValueError:
         return raw.replace("T", " ")
+
+
+class GpuDownloadWorker(QObject):
+    progress = Signal(str, float)
+    finished = Signal()
+    failed = Signal(str)
+    cancelled = Signal()
+
+    def __init__(self, cancel: Event):
+        super().__init__()
+        self._cancel = cancel
+
+    def run(self) -> None:
+        try:
+            install(self._cancel, lambda message, ratio: self.progress.emit(str(message), float(ratio)))
+            self.finished.emit()
+        except CancelledError:
+            self.cancelled.emit()
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc) or exc.__class__.__name__)
 
 
 class ConvertWorker(QObject):
@@ -207,6 +230,7 @@ class MainWindow(QMainWindow):
 
         self._source: Path | None = None
         self._busy = False
+        self._downloading = False
         self._cancel: Event | None = None
         self._thread: QThread | None = None
         self._worker: ConvertWorker | None = None
@@ -219,7 +243,8 @@ class MainWindow(QMainWindow):
         self._convert_fn = convert_fn or self._make_default_convert()
 
         self._build_ui()
-        self._show_device_status()
+        self._apply_window_icon()
+        self._sync_gpu_controls()
         self.reload_history()
 
     def _make_default_convert(self):
@@ -246,15 +271,36 @@ class MainWindow(QMainWindow):
 
         return _fn
 
-    def _show_device_status(self) -> None:
-        try:
-            from app.device import resolve_device
+    def _apply_window_icon(self) -> None:
+        icon_path = app_icon_path()
+        if icon_path.is_file():
+            icon = QIcon(str(icon_path))
+            self.setWindowIcon(icon)
+            app = self.window().windowHandle()
+            if app is not None:
+                app.setIcon(icon)
+            from PySide6.QtWidgets import QApplication
 
-            device = resolve_device()
-        except Exception:
-            device = "cpu"
-        if device == "cpu":
+            application = QApplication.instance()
+            if application is not None:
+                application.setWindowIcon(icon)
+
+    def _show_device_status(self) -> None:
+        if self.gpu_radio.isChecked() and self._gpu_installed:
+            self.statusBar().showMessage("使用 GPU")
+        elif self.gpu_radio.isChecked():
+            self.statusBar().showMessage("使用 GPU 前需要先下载显卡组件")
+        else:
             self.statusBar().showMessage("使用 CPU，会比较慢")
+
+    def _sync_gpu_controls(self) -> None:
+        self._gpu_installed = gpu_installed()
+        audio = not _direct_score_path(self._source)
+        want_gpu = audio and self.gpu_radio.isChecked()
+        self.gpu_note.setVisible(want_gpu and not self._gpu_installed)
+        self.gpu_download_button.setVisible(want_gpu and not self._gpu_installed)
+        self.gpu_script_button.setVisible(want_gpu)
+        self._show_device_status()
 
     def _build_ui(self) -> None:
         hero = QLabel("把音频或乐谱转成琴谱")
@@ -286,6 +332,36 @@ class MainWindow(QMainWindow):
         kind_row.addWidget(self.other_radio)
         kind_row.addStretch(1)
 
+        self._gpu_installed = gpu_installed()
+        self.device_label = QLabel("计算设备")
+        self.gpu_radio = QRadioButton("GPU")
+        self.cpu_radio = QRadioButton("CPU")
+        if self._gpu_installed:
+            self.gpu_radio.setChecked(True)
+        else:
+            self.cpu_radio.setChecked(True)
+        self.gpu_radio.toggled.connect(lambda _checked: self._sync_gpu_controls())
+        self.cpu_radio.toggled.connect(lambda _checked: self._sync_gpu_controls())
+        device_row = QHBoxLayout()
+        device_row.addWidget(self.gpu_radio)
+        device_row.addWidget(self.cpu_radio)
+        device_row.addStretch(1)
+
+        self.gpu_note = QLabel(explain_text())
+        self.gpu_note.setObjectName("note")
+        self.gpu_note.setWordWrap(True)
+        self.gpu_download_button = QPushButton("下载 GPU 组件")
+        self.gpu_download_button.clicked.connect(self._on_gpu_download_clicked)
+        self.gpu_script_button = QPushButton("打开安装脚本")
+        self.gpu_script_button.clicked.connect(self._open_gpu_script)
+        gpu_actions = QHBoxLayout()
+        gpu_actions.addWidget(self.gpu_download_button)
+        gpu_actions.addWidget(self.gpu_script_button)
+        gpu_actions.addStretch(1)
+        self.gpu_note.hide()
+        self.gpu_download_button.hide()
+        self.gpu_script_button.hide()
+
         self.pdf_note = QLabel("PDF 识别准确度有限：清晰的印刷五线谱较好，扫描件、手写、简谱、吉他谱经常认错。请对照原谱。第一次使用需要联网下载识别模型。")
         self.pdf_note.setObjectName("note")
         self.pdf_note.setWordWrap(True)
@@ -310,6 +386,10 @@ class MainWindow(QMainWindow):
         card_layout.addLayout(file_row)
         card_layout.addWidget(self.kind_label)
         card_layout.addLayout(kind_row)
+        card_layout.addWidget(self.device_label)
+        card_layout.addLayout(device_row)
+        card_layout.addWidget(self.gpu_note)
+        card_layout.addLayout(gpu_actions)
         card_layout.addWidget(self.pdf_note)
         card_layout.addWidget(self.start_button)
         card_layout.addWidget(self.progress_bar)
@@ -374,6 +454,10 @@ class MainWindow(QMainWindow):
         self.kind_label.setVisible(not direct)
         self.piano_radio.setVisible(not direct)
         self.other_radio.setVisible(not direct)
+        self.device_label.setVisible(not direct)
+        self.gpu_radio.setVisible(not direct)
+        self.cpu_radio.setVisible(not direct)
+        self._sync_gpu_controls()
         self.pdf_note.setVisible(_is_pdf_path(self._source))
         if self._busy:
             return
@@ -400,6 +484,89 @@ class MainWindow(QMainWindow):
         if chosen:
             self.set_source_file(Path(chosen))
 
+    def _wants_gpu(self) -> bool:
+        return self.gpu_radio.isChecked() and not _direct_score_path(self._source)
+
+    def _open_gpu_script(self) -> None:
+        from app.gpu_setup import install_script_path
+        import subprocess
+
+        path = install_script_path()
+        if not path.is_file():
+            QMessageBox.warning(self, "PianoConvert", f"找不到安装脚本：{path}")
+            return
+        subprocess.Popen(["explorer", "/select,", str(path)])
+
+    def _on_gpu_download_clicked(self) -> None:
+        if self._downloading:
+            if self._cancel is not None:
+                self._cancel.set()
+                self.status_label.setText("正在取消下载…")
+            return
+        if self._busy:
+            return
+        answer = QMessageBox.question(
+            self,
+            "下载 GPU 组件",
+            explain_text() + "\n\n开始下载后，进度条会显示百分比和已下载大小。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._start_gpu_download()
+
+    def _start_gpu_download(self) -> None:
+        self._busy = True
+        self._downloading = True
+        self._cancel = Event()
+        self.gpu_download_button.setText("取消下载")
+        self.gpu_download_button.setEnabled(True)
+        self.start_button.setEnabled(False)
+        self.pick_button.setEnabled(False)
+        self.pick_score_button.setEnabled(False)
+        self.pick_pdf_button.setEnabled(False)
+        self.piano_radio.setEnabled(False)
+        self.other_radio.setEnabled(False)
+        self.gpu_radio.setEnabled(False)
+        self.cpu_radio.setEnabled(False)
+        self.gpu_script_button.setEnabled(False)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("%p%")
+        self.progress_bar.setTextVisible(True)
+        self.status_label.setText("准备下载 GPU 组件")
+        self._thread = QThread(self)
+        worker = GpuDownloadWorker(self._cancel)
+        self._worker = worker
+        worker.moveToThread(self._thread)
+        self._thread.started.connect(worker.run)
+        worker.progress.connect(self._on_progress, Qt.ConnectionType.QueuedConnection)
+        worker.finished.connect(self._on_gpu_download_finished, Qt.ConnectionType.QueuedConnection)
+        worker.cancelled.connect(self._on_gpu_download_cancelled, Qt.ConnectionType.QueuedConnection)
+        worker.failed.connect(self._on_gpu_download_failed, Qt.ConnectionType.QueuedConnection)
+        worker.finished.connect(self._thread.quit)
+        worker.cancelled.connect(self._thread.quit)
+        worker.failed.connect(self._thread.quit)
+        self._thread.finished.connect(worker.deleteLater)
+        self._thread.start()
+
+    def _on_gpu_download_finished(self) -> None:
+        self._downloading = False
+        self.progress_bar.setValue(100)
+        self._reset_idle_ui("GPU 组件已安装")
+        self._sync_gpu_controls()
+
+    def _on_gpu_download_cancelled(self) -> None:
+        self._downloading = False
+        self.progress_bar.setValue(0)
+        self._reset_idle_ui("已取消下载")
+
+    def _on_gpu_download_failed(self, message: str) -> None:
+        self._downloading = False
+        self.progress_bar.setValue(0)
+        self._reset_idle_ui("GPU 组件下载失败")
+        QMessageBox.warning(self, "PianoConvert", message or "GPU 组件下载失败")
+
     def _on_start_clicked(self) -> None:
         if self._busy:
             if self._cancel is not None:
@@ -407,6 +574,9 @@ class MainWindow(QMainWindow):
                 self.status_label.setText("正在取消…")
             return
         if self._source is None:
+            return
+        if self._wants_gpu() and not gpu_installed():
+            self._on_gpu_download_clicked()
             return
         self._start_job()
 
@@ -422,6 +592,12 @@ class MainWindow(QMainWindow):
         self.pick_pdf_button.setEnabled(False)
         self.piano_radio.setEnabled(False)
         self.other_radio.setEnabled(False)
+        self.gpu_radio.setEnabled(False)
+        self.cpu_radio.setEnabled(False)
+        self.gpu_download_button.setEnabled(False)
+        self.gpu_script_button.setEnabled(False)
+        for engine in self._engines.values():
+            engine.device = "cuda" if self.gpu_radio.isChecked() else "cpu"
         self.progress_bar.setValue(0)
         self.status_label.setText("准备中")
 
@@ -481,6 +657,12 @@ class MainWindow(QMainWindow):
         self.pick_pdf_button.setEnabled(True)
         self.piano_radio.setEnabled(True)
         self.other_radio.setEnabled(True)
+        self.cpu_radio.setEnabled(True)
+        self.gpu_radio.setEnabled(True)
+        self.gpu_download_button.setEnabled(True)
+        self.gpu_script_button.setEnabled(True)
+        self.gpu_download_button.setText("下载 GPU 组件")
+        self.progress_bar.setTextVisible(False)
         self._apply_source_mode()
         self.start_button.setEnabled(self._source is not None)
         if status_text:

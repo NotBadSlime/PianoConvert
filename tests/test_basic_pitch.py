@@ -5,7 +5,15 @@ import pretty_midi
 import pytest
 
 from app.engines.base import CancelledError
-from app.engines.basic_pitch import BasicPitchEngine
+from app.engines.basic_pitch import BasicPitchEngine, onnx_providers
+
+
+def test_onnx_providers_follow_device(monkeypatch):
+    import onnxruntime as ort
+
+    monkeypatch.setattr(ort, "get_available_providers", lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"])
+    assert onnx_providers("cuda") == ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    assert onnx_providers("cpu") == ["CPUExecutionProvider"]
 
 
 def test_basic_pitch_writes_midi(tmp_path, monkeypatch):

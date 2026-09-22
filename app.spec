@@ -94,6 +94,10 @@ datas = [
 ]
 for _pkg in MUSIC21_DATAS_PACKAGES:
     datas.append((str(_package_dir(_pkg)), _pkg))
+datas.append((str(root / "assets" / "PianoConvert.ico"), "assets"))
+datas.append((str(root / "scripts" / "install_gpu.ps1"), "scripts"))
+datas.append((str(root / "app" / "gpu_worker.py"), "app"))
+datas.append((str(root / "piano_transcription_inference"), "piano_transcription_inference_src"))
 datas += collect_data_files("torchlibrosa")
 datas += collect_data_files("basic_pitch")
 datas += collect_data_files("resampy")
@@ -148,6 +152,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="PianoConvert",
+    icon=str(root / "assets" / "PianoConvert.ico"),
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

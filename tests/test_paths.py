@@ -72,3 +72,23 @@ def test_resolve_device_cpu_when_cuda_false(monkeypatch):
 
     monkeypatch.setattr(device_mod, "torch", _Torch())
     assert device_mod.resolve_device() == "cpu"
+    assert device_mod.resolve_device("cpu") == "cpu"
+    with pytest.raises(device_mod.DeviceError):
+        device_mod.resolve_device("cuda")
+
+
+def test_resolve_device_honors_cpu_even_when_cuda_exists(monkeypatch):
+    import app.device as device_mod
+
+    class _Cuda:
+        @staticmethod
+        def is_available():
+            return True
+
+    class _Torch:
+        cuda = _Cuda()
+
+    monkeypatch.setattr(device_mod, "torch", _Torch())
+    assert device_mod.resolve_device() == "cuda"
+    assert device_mod.resolve_device("cuda") == "cuda"
+    assert device_mod.resolve_device("cpu") == "cpu"

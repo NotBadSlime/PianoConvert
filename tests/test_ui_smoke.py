@@ -18,6 +18,21 @@ def test_start_disabled_without_file():
     assert win.start_button.isEnabled() is False
     assert win.windowTitle() == "PianoConvert"
     assert win.piano_radio.isChecked() is True
+    assert win.gpu_radio.isEnabled() is True
+    assert win.windowIcon().isNull() is False
+
+
+def test_gpu_choice_shows_download_and_script(monkeypatch):
+    monkeypatch.setattr("app.ui.main_window.gpu_installed", lambda: False)
+    app = QApplication.instance() or QApplication([])
+    win = MainWindow()
+    assert win.cpu_radio.isChecked() is True
+    assert win.gpu_download_button.isHidden() is True
+    win.gpu_radio.setChecked(True)
+    assert win.gpu_download_button.isHidden() is False
+    assert win.gpu_script_button.isHidden() is False
+    assert "2.3 GB" in win.gpu_note.text()
+    assert "进度" in win.gpu_note.text()
 
 
 def test_choosing_file_enables_start(tmp_path):

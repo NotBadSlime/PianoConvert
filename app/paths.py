@@ -39,6 +39,18 @@ def make_output_dir(source: Path) -> Path:
     return folder
 
 
+def app_icon_path() -> Path:
+    import sys
+
+    name = Path("assets") / "PianoConvert.ico"
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        frozen = Path(meipass) / name
+        if frozen.exists():
+            return frozen
+    return repo_root() / name
+
+
 def model_checkpoint() -> Path:
     bundled = repo_root() / "models" / CHECKPOINT_NAME
     if bundled.exists():
