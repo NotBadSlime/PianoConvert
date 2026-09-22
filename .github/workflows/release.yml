@@ -48,7 +48,13 @@ jobs:
       - run: pip install "setuptools>=65,<81"
       - run: pip install --ignore-requires-python --no-deps homr==0.7.0
       - run: pip install musicxml==1.4 "opencv-python-headless>=4.10,<4.13" "pypdfium2>=4,<6" "rapidocr>=3.7,<4"
+      - name: Download piano model
+        shell: pwsh
+        run: .\scripts\download_model.ps1 -Output "models\note_F1=0.9677_pedal_F1=0.9186.pth"
       - run: PyInstaller app.spec --noconfirm
+      - name: Smoke test frozen app
+        shell: pwsh
+        run: .\scripts\verify_frozen.ps1
       - name: Install Inno Setup
         run: choco install innosetup -y
       - name: Compile installer
