@@ -20,7 +20,7 @@ def main() -> None:
     app = QApplication([])
     app.setStyleSheet(APP_QSS)
     win = MainWindow()
-    win.resize(720, 760)
+    win.resize(860, 760)
     win.show()
     app.exec()
 

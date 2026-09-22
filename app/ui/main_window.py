@@ -6,7 +6,7 @@ from pathlib import Path
 from threading import Event
 from uuid import uuid4
 
-from PySide6.QtCore import QEvent, QObject, QThread, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QSize, QThread, Qt, Signal
 from PySide6.QtGui import QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QRadioButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -104,6 +105,10 @@ class HistoryRow(QWidget):
 
         title = QLabel(item.title)
         title.setStyleSheet("font-weight: 600;")
+        title.setWordWrap(False)
+        title.setToolTip(item.title)
+        title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self._title = title
         meta = QLabel(
             " · ".join(
                 [
@@ -156,15 +161,31 @@ class HistoryRow(QWidget):
             self.keyboard_button.hide()
             self.folder_button.hide()
 
-        row = QHBoxLayout(self)
-        row.setContentsMargins(10, 8, 10, 8)
-        row.setSpacing(8)
-        row.addLayout(text_col, 1)
-        row.addWidget(self.midi_button)
-        row.addWidget(self.xml_button)
-        row.addWidget(self.keyboard_button)
-        row.addWidget(self.folder_button)
-        self.setMinimumHeight(72)
+        buttons = QHBoxLayout()
+        buttons.setContentsMargins(0, 0, 0, 0)
+        buttons.setSpacing(8)
+        buttons.addWidget(self.midi_button)
+        buttons.addWidget(self.xml_button)
+        buttons.addWidget(self.keyboard_button)
+        buttons.addWidget(self.folder_button)
+        buttons.addStretch(1)
+
+        column = QVBoxLayout(self)
+        column.setContentsMargins(10, 8, 10, 8)
+        column.setSpacing(8)
+        column.addLayout(text_col)
+        column.addLayout(buttons)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        hint = super().sizeHint()
+        return QSize(320, max(hint.height(), 96))
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        width = max(40, self.width() - 24)
+        self._title.setText(
+            self._title.fontMetrics().elidedText(self.item.title, Qt.TextElideMode.ElideRight, width)
+        )
 
     def _open(self, path: str) -> None:
         target = Path(path) if path else Path()
@@ -302,6 +323,7 @@ class MainWindow(QMainWindow):
         history_title.setStyleSheet("font-weight: 600; font-size: 16px;")
         self.history_list = QListWidget()
         self.history_list.setSpacing(4)
+        self.history_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         root = QWidget()
         layout = QVBoxLayout(root)
@@ -487,9 +509,22 @@ class MainWindow(QMainWindow):
         for item in items[::-1]:
             row = HistoryRow(item, self.history_list)
             list_item = QListWidgetItem()
-            list_item.setSizeHint(row.sizeHint())
             self.history_list.addItem(list_item)
             self.history_list.setItemWidget(list_item, row)
+        self._fit_history_rows()
+
+    def _fit_history_rows(self) -> None:
+        width = max(320, self.history_list.viewport().width())
+        for index in range(self.history_list.count()):
+            item = self.history_list.item(index)
+            widget = self.history_list.itemWidget(item)
+            height = widget.sizeHint().height() if widget is not None else 96
+            item.setSizeHint(QSize(width, height))
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if hasattr(self, "history_list"):
+            self._fit_history_rows()
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if self._cancel is not None:
