@@ -6,9 +6,11 @@ import sys
 
 
 def _piano(audio: str, midi: str, checkpoint: str) -> None:
-    from piano_transcription_inference import PianoTranscription
+    import librosa
+    from piano_transcription_inference import PianoTranscription, sample_rate
 
-    PianoTranscription(device="cuda", checkpoint_path=checkpoint).transcribe(audio, midi)
+    wave, _ = librosa.load(audio, sr=sample_rate, mono=True)
+    PianoTranscription(device="cuda", checkpoint_path=checkpoint).transcribe(wave, midi)
 
 
 def _other(audio: str, midi: str) -> None:

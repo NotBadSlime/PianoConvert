@@ -1,10 +1,13 @@
+import wave
 from pathlib import Path
 from threading import Event
 
+import numpy as np
 import pytest
 
 from app.engines.base import CancelledError
 from app.engines.kong_piano import KongPianoEngine
+from piano_transcription_inference.inference import prepare_waveform
 
 
 class FakeTranscriber:
@@ -17,6 +20,27 @@ class FakeTranscriber:
         pm.instruments.append(inst)
         Path(midi_path).parent.mkdir(parents=True, exist_ok=True)
         pm.write(str(midi_path))
+
+
+def test_prepare_waveform_reads_audio_file(tmp_path):
+    path = tmp_path / "tone.wav"
+    rate = 16000
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(b"\x00\x00" * rate)
+    loaded = prepare_waveform(path)
+    assert loaded.ndim == 1
+    assert loaded.shape[0] == rate
+    assert loaded.dtype == np.float32
+
+
+def test_prepare_waveform_keeps_existing_samples():
+    samples = np.linspace(-1, 1, 32, dtype=np.float32)
+    loaded = prepare_waveform(samples)
+    assert loaded.shape == (32,)
+    assert np.allclose(loaded, samples)
 
 
 def test_kong_writes_midi(tmp_path, monkeypatch):

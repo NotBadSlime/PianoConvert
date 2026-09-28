@@ -13,6 +13,20 @@ from .pytorch_utils import move_data_to_device, forward
 from . import config
 
 
+def prepare_waveform(audio):
+    """Return a mono float waveform at the model sample rate.
+
+    Callers may pass either a 1-D sample array or a path. A path used to be
+    indexed like an array and failed with ``string indices must be integers``.
+    """
+    if isinstance(audio, (str, os.PathLike)):
+        audio, _ = librosa.load(os.fspath(audio), sr=config.sample_rate, mono=True)
+    audio = np.asarray(audio, dtype=np.float32)
+    if audio.ndim > 1:
+        audio = np.mean(audio, axis=-1)
+    return np.ascontiguousarray(audio.reshape(-1))
+
+
 class PianoTranscription(object):
     def __init__(self, model_type='Note_pedal',
         segment_samples=16000*10, device=torch.device('cuda'),
@@ -71,14 +85,14 @@ class PianoTranscription(object):
         """Transcribe an audio recording.
 
         Args:
-          audio: (audio_samples,)
+          audio: (audio_samples,) or a path to an audio file
           midi_path: str, path to write out the transcribed MIDI.
 
         Returns:
           transcribed_dict, dict: {'output_dict':, ..., 'est_note_events': ...}
 
         """
-        audio = audio[None, :]  # (1, audio_samples)
+        audio = prepare_waveform(audio)[None, :]  # (1, audio_samples)
 
         # Pad audio to be evenly divided by segment_samples
         audio_len = audio.shape[1]
