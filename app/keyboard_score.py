@@ -507,11 +507,21 @@ def notes_from_musicxml(path: Path) -> tuple[list[NoteEvent], list[tuple[float, 
         except Exception:  # noqa: BLE001
             continue
         if isinstance(el, chord.Chord):
-            for p in el.pitches:
-                notes.append(NoteEvent(int(p.midi), start, end))
+            for n in el.notes:
+                if _is_tie_continuation(n) or _is_tie_continuation(el):
+                    continue
+                notes.append(NoteEvent(int(n.pitch.midi), start, end))
         elif isinstance(el, note.Note) and el.pitch is not None:
+            if _is_tie_continuation(el):
+                continue
             notes.append(NoteEvent(int(el.pitch.midi), start, end))
     return notes, tempos, _prepare_meters(meters)
+
+
+def _is_tie_continuation(el) -> bool:
+    """A tied note that only holds the previous note; it must not be pressed again."""
+    tie = getattr(el, "tie", None)
+    return tie is not None and tie.type in ("stop", "continue")
 
 
 def notes_to_text(

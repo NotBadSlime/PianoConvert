@@ -13,7 +13,7 @@ from app.keyboard_score import (
     score_file_to_keyboard_text,
 )
 from app.paths import safe_stem
-from app.pdf_omr import PDF_SUFFIXES, PdfOmrError, recognize_pdf
+from app.pdf_omr import IMAGE_SUFFIXES, PDF_SUFFIXES, PdfOmrError, count_staves, recognize_pdf
 from app.score_io import midi_to_musicxml
 
 AUDIO_SUFFIXES = {".mp3", ".wav", ".flac", ".ogg", ".m4a"}
@@ -222,20 +222,22 @@ def run_pdf(
 ) -> ConvertResult:
     source = Path(source)
     if source.suffix.lower() not in PDF_SUFFIXES or not source.exists():
-        raise ConvertError("不支持这个 PDF 文件")
+        raise ConvertError("不支持这个文件，请选择 PDF 或 PNG / JPG 图片")
     from app.paths import output_root as default_root
 
     root = output_root or default_root()
     root.mkdir(parents=True, exist_ok=True)
     folder = _stamp_dir(root, source)
     work = safe_stem(source.name)
-    copied = folder / f"{work}.pdf"
+    copied = folder / _work_name(source)
     xml_path = folder / f"{work}.musicxml"
     keyboard_path = folder / f"{work}_键盘谱.txt"
     midi_path = folder / f"{work}.mid"
     kind = "pdf"
     progress = on_progress or (lambda _m, _p: None)
-    run_recognize = recognize or recognize_pdf
+    run_recognize = recognize or (
+        lambda pdf, work_dir, stop: recognize_pdf(pdf, work_dir, stop, on_progress=progress)
+    )
 
     def _cancelled_result(err: str = "") -> ConvertResult:
         if folder.exists():
@@ -250,17 +252,25 @@ def run_pdf(
     try:
         if cancel.is_set():
             return _cancelled_result()
-        progress("读取 PDF", 0.1)
+        is_image = source.suffix.lower() in IMAGE_SUFFIXES
+        progress("读取图片" if is_image else "读取 PDF", 0.1)
         shutil.copy2(source, copied)
-        progress("识别乐谱（准确度有限）", 0.3)
+        progress("识别乐谱（准确度有限）", 0.15)
         produced = run_recognize(copied, folder, cancel)
         if cancel.is_set():
             return _cancelled_result()
-        if produced.resolve() != xml_path.resolve():
-            xml_path.write_bytes(produced.read_bytes())
+        is_jianpu = produced.suffix.lower() in {".mid", ".midi"}
+        result_path = midi_path if is_jianpu else xml_path
+        if produced.resolve() != result_path.resolve():
+            result_path.write_bytes(produced.read_bytes())
+            if produced.parent.resolve() == folder.resolve():
+                produced.unlink(missing_ok=True)
         progress("写入键盘谱", 0.8)
-        text = score_file_to_keyboard_text(xml_path, work)
-        note = "# 由 PDF 自动识别，准确度有限，请对照原谱。\n"
+        text = score_file_to_keyboard_text(result_path, work)
+        kind_text = "简谱" if is_jianpu else ""
+        note = f"# 由{'图片' if is_image else ' PDF '}{kind_text}自动识别，准确度有限，请对照原谱。\n"
+        if not is_jianpu and count_staves(xml_path) > 2:
+            note += "# 注意：这份谱每行超过两行五线谱（多半是人声 + 钢琴），这类谱容易认错位，结果可能偏差较大。\n"
         keyboard_path.write_text(note + text, encoding="utf-8")
         progress("完成", 1.0)
         return _pack("success", "")

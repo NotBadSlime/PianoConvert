@@ -38,7 +38,7 @@ KIND_LABELS = {"piano": "钢琴", "other": "其他乐器", "score": "键盘谱",
 STATUS_LABELS = {"success": "成功", "partial": "部分成功", "failed": "失败"}
 AUDIO_FILTER = "音频文件 (*.mp3 *.wav *.flac *.ogg *.m4a)"
 SCORE_FILTER = "乐谱文件 (*.mid *.midi *.musicxml *.xml *.mxl)"
-PDF_FILTER = "PDF 乐谱 (*.pdf)"
+PDF_FILTER = "PDF 或图片五线谱 (*.pdf *.png *.jpg *.jpeg)"
 
 
 def default_engines():
@@ -305,14 +305,14 @@ class MainWindow(QMainWindow):
     def _build_ui(self) -> None:
         hero = QLabel("把音频或乐谱转成琴谱")
         hero.setObjectName("hero")
-        subtitle = QLabel("音频、MIDI、MusicXML 或 PDF 五线谱，生成原神键盘谱")
+        subtitle = QLabel("音频、MIDI、MusicXML，或 PDF / 图片五线谱，生成原神键盘谱")
         subtitle.setObjectName("muted")
 
         self.pick_button = QPushButton("选择音频文件")
         self.pick_button.clicked.connect(self._choose_file)
         self.pick_score_button = QPushButton("选择 MIDI / MusicXML")
         self.pick_score_button.clicked.connect(self._choose_score_file)
-        self.pick_pdf_button = QPushButton("选择 PDF 乐谱")
+        self.pick_pdf_button = QPushButton("选择 PDF / 图片")
         self.pick_pdf_button.clicked.connect(self._choose_pdf_file)
         self.file_label = QLabel("尚未选择文件")
         self.file_label.setObjectName("muted")
@@ -362,7 +362,7 @@ class MainWindow(QMainWindow):
         self.gpu_download_button.hide()
         self.gpu_script_button.hide()
 
-        self.pdf_note = QLabel("PDF 识别准确度有限：清晰的印刷五线谱较好，扫描件、手写、简谱、吉他谱经常认错。请对照原谱。第一次使用需要联网下载识别模型。")
+        self.pdf_note = QLabel("PDF / 图片识别准确度有限：认印刷的五线谱和双手简谱（自动判断），不认吉他谱、手写谱。清晰的印刷谱较好，拍照、扫描件经常认错。请对照原谱。第一次认五线谱需要联网下载识别模型。")
         self.pdf_note.setObjectName("note")
         self.pdf_note.setWordWrap(True)
         self.pdf_note.hide()
@@ -480,7 +480,7 @@ class MainWindow(QMainWindow):
     def _choose_pdf_file(self) -> None:
         if self._busy:
             return
-        chosen, _ = QFileDialog.getOpenFileName(self, "选择 PDF 乐谱", "", PDF_FILTER)
+        chosen, _ = QFileDialog.getOpenFileName(self, "选择 PDF 或图片五线谱", "", PDF_FILTER)
         if chosen:
             self.set_source_file(Path(chosen))
 

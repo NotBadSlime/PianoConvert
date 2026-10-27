@@ -7,3 +7,4 @@ dist/
 installer/output/
 Output/
 models/*.pth
+.eval/

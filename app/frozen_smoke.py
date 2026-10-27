@@ -36,6 +36,14 @@ def check_imports() -> list[str]:
     except Exception as exc:  # noqa: BLE001
         errors.append(f"basic_pitch.inference: {exc}")
     try:
+        import cv2  # noqa: F401
+        import pypdfium2  # noqa: F401
+        from rapidocr import RapidOCR  # noqa: F401
+
+        from app import jianpu, pdf_omr  # noqa: F401
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"score recognition: {exc}")
+    try:
         import pkg_resources
         pkg_resources.resource_filename("resampy.filters", "data/kaiser_fast.npz")
     except Exception as exc:  # noqa: BLE001
