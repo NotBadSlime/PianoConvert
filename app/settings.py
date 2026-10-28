@@ -6,10 +6,17 @@ import json
 from app.paths import settings_path
 
 SCORE_STYLE = "score_style"
+RANGE_STRATEGY = "range_strategy"
 THEME = "theme"                    # "system" (跟随系统) / "light" / "dark"
 PREVIEW_ZOOM = "preview_zoom"      # percent, 70 … 200
-PREVIEW_SECTION = "preview_section"  # "keyboard" / "jianpu" / "all"
-DEFAULTS = {SCORE_STYLE: "detailed", THEME: "system", PREVIEW_ZOOM: 100, PREVIEW_SECTION: "keyboard"}
+PREVIEW_SECTION = "preview_section"  # "keyboard" / "jianpu" / "fingertip" / "all"
+DEFAULTS = {
+    SCORE_STYLE: "detailed",
+    RANGE_STRATEGY: "modern",
+    THEME: "system",
+    PREVIEW_ZOOM: 100,
+    PREVIEW_SECTION: "keyboard",
+}
 
 
 def load_settings() -> dict:

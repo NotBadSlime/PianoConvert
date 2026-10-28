@@ -17,8 +17,6 @@ REQUIRED_IMPORTS = (
     ("torch", "torch"),
     ("homr", "homr"),
     ("musicxml", "musicxml"),
-    ("verovio", "verovio"),
-    ("PySide6.QtSvg", "PySide6.QtSvg"),
 )
 
 
@@ -53,14 +51,6 @@ def check_imports() -> list[str]:
     return errors
 
 
-_SMOKE_MUSICXML = """<?xml version="1.0" encoding="UTF-8"?>
-<score-partwise version="3.1"><part-list><score-part id="P1"><part-name>P</part-name></score-part></part-list>
-<part id="P1"><measure number="1"><attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time>
-<clef><sign>G</sign><line>2</line></clef></attributes>
-<note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><type>whole</type></note></measure></part></score-partwise>
-"""
-
-
 def run_smoke() -> int:
     import os
     import sys
@@ -86,20 +76,6 @@ def run_smoke() -> int:
         app.processEvents()
     except Exception as exc:  # noqa: BLE001
         errors.append(f"ui: {exc}")
-    try:
-        # the staff-notation PDF: Verovio's data and Qt's SVG renderer must be packaged
-        import tempfile
-
-        from app.score_io import musicxml_to_pdf
-
-        work = Path(tempfile.mkdtemp())
-        xml = work / "smoke.musicxml"
-        xml.write_text(_SMOKE_MUSICXML, encoding="utf-8")
-        musicxml_to_pdf(xml, work / "smoke.pdf")
-        if (work / "smoke.pdf").stat().st_size < 1000:
-            errors.append("staff-notation PDF: empty")
-    except Exception as exc:  # noqa: BLE001
-        errors.append(f"staff-notation PDF: {exc}")
 
     log = Path(os.environ.get("TEMP", ".")) / "PianoConvert-smoke.log"
     if errors:

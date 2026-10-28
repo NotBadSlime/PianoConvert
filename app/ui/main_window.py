@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QComboBox,
     QPushButton,
     QRadioButton,
     QSizePolicy,
@@ -34,10 +35,26 @@ from app.convert import AUDIO_SUFFIXES
 from app.engines.base import CancelledError
 from app.gpu_setup import explain_text, gpu_installed, install
 from app.history import HistoryItem, append_item, load_items, remove_item, restore_item
-from app.keyboard_score import SCORE_SUFFIXES, STYLE_DETAILED, STYLE_SIMPLE
+from app.keyboard_score import (
+    RANGE_STRATEGY_DEFAULT,
+    RANGE_STRATEGY_LABELS,
+    RANGE_STRATEGY_MODERN,
+    RANGE_STRATEGY_SMART,
+    SCORE_SUFFIXES,
+    STYLE_DETAILED,
+    STYLE_SIMPLE,
+)
 from app.paths import app_icon_path
 from app.pdf_omr import PDF_SUFFIXES
-from app.settings import PREVIEW_SECTION, PREVIEW_ZOOM, SCORE_STYLE, THEME, load_settings, save_setting
+from app.settings import (
+    PREVIEW_SECTION,
+    PREVIEW_ZOOM,
+    RANGE_STRATEGY,
+    SCORE_STYLE,
+    THEME,
+    load_settings,
+    save_setting,
+)
 from app.ui import icons
 from app.ui.preview import KIND_GLYPHS, KIND_LABELS, STATUS_LABELS, PreviewPanel, format_time
 from app.ui.theme import MODE_DARK, MODE_LIGHT, MODE_SYSTEM, MODES, ThemeManager, apply_window_frame
@@ -306,18 +323,15 @@ class HistoryRow(QWidget):
         self.midi_button.setToolTip("打开 MIDI")
         self.xml_button = QPushButton("MusicXML")
         self.xml_button.setToolTip("打开 MusicXML")
-        self.pdf_button = QPushButton("PDF")
-        self.pdf_button.setToolTip("打开五线谱 PDF")
-        self.keyboard_button = QPushButton("键盘谱")
+        self.keyboard_button = QPushButton("打开键盘谱")
         self.keyboard_button.setToolTip("用记事本等程序打开（双击这一条也可以）")
-        self.folder_button = QPushButton("文件夹")
+        self.folder_button = QPushButton("打开文件夹")
         self.folder_button.setToolTip("打开这次结果所在的文件夹")
         targets = (
             (self.keyboard_button, item.keyboard_path),
             (self.folder_button, item.folder),
             (self.midi_button, item.midi_path),
             (self.xml_button, item.musicxml_path),
-            (self.pdf_button, getattr(item, "pdf_path", "")),
         )
         buttons = QHBoxLayout()
         buttons.setContentsMargins(0, 0, 0, 0)
@@ -429,12 +443,32 @@ class MainWindow(QMainWindow):
             from app.convert import run_score
 
             style = getattr(self, "_job_style", None) or self.score_style()
+            range_strategy = getattr(self, "_job_range_strategy", None) or self.range_strategy()
+            range_kwargs = (
+                {"range_strategy": range_strategy}
+                if range_strategy != RANGE_STRATEGY_DEFAULT
+                else {}
+            )
             if kind == "score":
-                return run_score(source, cancel, output_root=None, on_progress=on_progress, style=style)
+                return run_score(
+                    source,
+                    cancel,
+                    output_root=None,
+                    on_progress=on_progress,
+                    style=style,
+                    **range_kwargs,
+                )
             if kind == "pdf":
                 from app.convert import run_pdf
 
-                return run_pdf(source, cancel, output_root=None, on_progress=on_progress, style=style)
+                return run_pdf(
+                    source,
+                    cancel,
+                    output_root=None,
+                    on_progress=on_progress,
+                    style=style,
+                    **range_kwargs,
+                )
             return convert_run(
                 source,
                 kind,
@@ -443,6 +477,7 @@ class MainWindow(QMainWindow):
                 output_root=None,
                 on_progress=on_progress,
                 style=style,
+                **range_kwargs,
             )
 
         return _fn
@@ -765,6 +800,7 @@ class MainWindow(QMainWindow):
         column.setSpacing(0)
         column.addWidget(self._build_options())
         column.addWidget(self._build_style_row())
+        column.addWidget(self._build_range_row())
         return self.settings_box
 
     def _build_options(self) -> QFrame:
@@ -864,6 +900,46 @@ class MainWindow(QMainWindow):
         column.addWidget(self._setting_row(self.style_label, self.style_help, self.style_segment))
         self._sync_style_help()
         return self.style_box
+
+    def _build_range_row(self) -> QFrame:
+        """Choose how notes outside the lyre range are transposed and folded."""
+        self.range_box = QFrame()
+        self.range_box.setObjectName("rangeBox")
+        column = QVBoxLayout(self.range_box)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(0)
+        self.range_label = QLabel("音域处理")
+        self.range_label.setObjectName("sectionLabel")
+        self.range_combo = QComboBox()
+        for strategy in (RANGE_STRATEGY_MODERN, RANGE_STRATEGY_SMART):
+            self.range_combo.addItem(RANGE_STRATEGY_LABELS[strategy], strategy)
+        self.range_combo.setToolTip(
+            "新版逐音折叠；旧版智能方案尽量保持乐句和弦的八度关系。"
+        )
+        saved = load_settings().get(RANGE_STRATEGY, RANGE_STRATEGY_DEFAULT)
+        index = self.range_combo.findData(saved)
+        self.range_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.range_help = ElidedLabel("")
+        self.range_help.setObjectName("helper")
+        self.range_combo.currentIndexChanged.connect(self._on_range_strategy_changed)
+        column.addWidget(self._setting_row(self.range_label, self.range_help, self.range_combo))
+        self._sync_range_help()
+        return self.range_box
+
+    def range_strategy(self) -> str:
+        value = self.range_combo.currentData()
+        return value if value in RANGE_STRATEGY_LABELS else RANGE_STRATEGY_DEFAULT
+
+    def _on_range_strategy_changed(self, _index: int) -> None:
+        save_setting(RANGE_STRATEGY, self.range_strategy())
+        self._sync_range_help()
+
+    def _sync_range_help(self) -> None:
+        help_text = {
+            RANGE_STRATEGY_MODERN: "新版：每个音独立按八度折回 C3–B5",
+            RANGE_STRATEGY_SMART: "旧版：尽量保持乐句和弦的整体八度",
+        }
+        self.range_help.setText(help_text[self.range_strategy()])
 
     def score_style(self) -> str:
         return STYLE_SIMPLE if self.simple_radio.isChecked() else STYLE_DETAILED
@@ -1400,6 +1476,7 @@ class MainWindow(QMainWindow):
             self.gpu_script_button,
             self.detailed_radio,
             self.simple_radio,
+            self.range_combo,
         ):
             widget.setEnabled(enabled)
         self.drop_zone.set_interactive(enabled)
@@ -1437,6 +1514,7 @@ class MainWindow(QMainWindow):
             return
         self._enter_busy_ui("准备中")
         self._job_style = self.score_style()
+        self._job_range_strategy = self.range_strategy()
         for engine in self._engines.values():
             engine.device = "cuda" if self.gpu_radio.isChecked() else "cpu"
 
@@ -1574,7 +1652,6 @@ class MainWindow(QMainWindow):
             folder=str(result.folder),
             error=result.error or "",
             keyboard_path=str(getattr(result, "keyboard_path", "") or ""),
-            pdf_path=str(getattr(result, "pdf_path", "") or ""),
         )
         append_item(item)
         return item

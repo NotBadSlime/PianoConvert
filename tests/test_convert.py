@@ -100,7 +100,7 @@ def test_oserror_write_humanized(tmp_path, monkeypatch):
     src = tmp_path / "tune.wav"
     src.write_bytes(b"xx")
 
-    def boom(midi, dest, *args):
+    def boom(midi, dest):
         raise OSError(28, "No space")
 
     monkeypatch.setattr("app.convert.midi_to_musicxml", boom)
@@ -114,7 +114,7 @@ def test_musicxml_cancelled_error_does_not_keep_folder(tmp_path, monkeypatch):
     src = tmp_path / "tune.wav"
     src.write_bytes(b"xx")
 
-    def boom(midi, dest, *args):
+    def boom(midi, dest):
         raise CancelledError()
 
     monkeypatch.setattr("app.convert.midi_to_musicxml", boom)
@@ -163,10 +163,8 @@ def test_run_score_from_midi(tmp_path):
     text = result.keyboard_path.read_text(encoding="utf-8")
     assert "【简谱】" in text
     assert "【键盘谱】" in text
-    # every conversion leaves all four files: MIDI, MusicXML, a staff-notation PDF, keyboard score
     assert result.midi_path.exists()
-    assert result.musicxml_path.exists()
-    assert result.pdf_path is not None and result.pdf_path.exists() and result.pdf_path.stat().st_size > 1000
+    assert not result.musicxml_path.exists()
 
 
 def test_run_score_rejects_audio(tmp_path):
@@ -174,38 +172,3 @@ def test_run_score_rejects_audio(tmp_path):
     src.write_bytes(b"x")
     with pytest.raises(ConvertError, match="乐谱"):
         run_score(src, Event(), output_root=tmp_path)
-
-def test_run_score_from_musicxml_makes_midi_and_pdf(tmp_path):
-    from music21 import note, stream
-
-    part = stream.Part()
-    for name in ("C4", "D4", "E4", "F4"):
-        part.append(note.Note(name, quarterLength=1))
-    src = tmp_path / "tune.musicxml"
-    stream.Score([part]).write("musicxml", fp=str(src))
-    result = run_score(src, Event(), output_root=tmp_path / "out")
-    assert result.status == "success", result.error
-    for path in (result.midi_path, result.musicxml_path, result.pdf_path, result.keyboard_path):
-        assert path.exists() and path.stat().st_size > 0
-
-
-def test_run_pdf_keeps_the_pdf_and_adds_midi_and_musicxml(tmp_path):
-    from app.convert import run_pdf
-
-    src = tmp_path / "sheet.pdf"
-    src.write_bytes(b"%PDF-1.4 fake")
-
-    def recognize(pdf, work_dir, stop):
-        out = work_dir / "sheet_vector.mid"
-        pm = pretty_midi.PrettyMIDI(initial_tempo=120)
-        inst = pretty_midi.Instrument(program=0, name="Staff 1")
-        for i, p in enumerate((60, 62, 64, 65)):
-            inst.notes.append(pretty_midi.Note(80, p, i * 0.5, i * 0.5 + 0.45))
-        pm.instruments.append(inst)
-        pm.write(str(out))
-        return out
-
-    result = run_pdf(src, Event(), output_root=tmp_path / "out", recognize=recognize)
-    assert result.status == "success", result.error
-    assert result.pdf_path.read_bytes() == src.read_bytes()   # the original PDF
-    assert result.midi_path.exists() and result.musicxml_path.exists() and result.keyboard_path.exists()

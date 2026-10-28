@@ -20,14 +20,12 @@ class HistoryItem:
     folder: str
     error: str
     keyboard_path: str = ""
-    pdf_path: str = ""
 
 
 def item_from_row(row: dict) -> HistoryItem:
     allowed = {f.name for f in fields(HistoryItem)}
     data = {key: row[key] for key in allowed if key in row}
     data.setdefault("keyboard_path", "")
-    data.setdefault("pdf_path", "")
     return HistoryItem(**data)
 
 

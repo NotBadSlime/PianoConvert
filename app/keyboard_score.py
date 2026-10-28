@@ -14,6 +14,7 @@ import unicodedata
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
+from statistics import median
 from typing import Sequence
 
 import pretty_midi
@@ -52,6 +53,16 @@ SNAP_UP = {1: 2, 3: 4, 6: 7, 8: 9, 10: 11}
 C3 = 48
 B5 = 83
 CLUSTER_SEC = 0.050
+
+# ``modern`` folds every note independently after the global transposition and
+# black-key snapping. ``smart`` retains the older phrase/chord octave handling.
+RANGE_STRATEGY_MODERN = "modern"
+RANGE_STRATEGY_SMART = "smart"
+RANGE_STRATEGY_DEFAULT = RANGE_STRATEGY_MODERN
+RANGE_STRATEGY_LABELS = {
+    RANGE_STRATEGY_MODERN: "新版：逐音八度折叠",
+    RANGE_STRATEGY_SMART: "旧版：智能乐句移调",
+}
 
 DOT_HIGH = "\u0307"  # jianpu dot above: high octave
 DOT_LOW = "\u0323"   # jianpu dot below: low octave
@@ -162,6 +173,27 @@ def best_transpose(pitches: list[int]) -> int:
     return best_shift
 
 
+def _old_best_transpose(pitches: list[int]) -> int:
+    """The pre-main1 transposition tie-breaking rule."""
+    best_shift = 0
+    best_count = -1
+    best_abs = 99
+    for shift in range(-11, 12):
+        count = _white_count(pitches, shift)
+        ab = abs(shift)
+        better = count > best_count
+        if not better and count == best_count:
+            if ab < best_abs:
+                better = True
+            elif ab == best_abs and shift >= 0 and best_shift < 0:
+                better = True
+        if better:
+            best_shift = shift
+            best_count = count
+            best_abs = ab
+    return best_shift
+
+
 def snap_pitch(pitch: int) -> int:
     pc = pitch % 12
     if pc in WHITE_PCS:
@@ -175,6 +207,12 @@ def fold_pitch(pitch: int) -> int:
     while pitch > B5:
         pitch -= 12
     return pitch
+
+
+def _validate_range_strategy(strategy: str) -> str:
+    if strategy not in RANGE_STRATEGY_LABELS:
+        raise KeyboardScoreError(f"未知的音域处理方案：{strategy}")
+    return strategy
 
 
 def cluster_notes(notes: list[NoteEvent]) -> list[tuple[float, list[int]]]:
@@ -197,6 +235,117 @@ def cluster_notes(notes: list[NoteEvent]) -> list[tuple[float, list[int]]]:
     return clustered
 
 
+def _cluster_event_groups(notes: Sequence[NoteEvent]) -> list[list[NoteEvent]]:
+    """Group attacks using the same 50 ms chord window as ``cluster_notes``."""
+    if not notes:
+        return []
+    ordered = sorted(notes, key=lambda n: (n.start, n.pitch))
+    groups: list[list[NoteEvent]] = [[ordered[0]]]
+    for note in ordered[1:]:
+        if note.start - groups[-1][0].start <= CLUSTER_SEC:
+            groups[-1].append(note)
+        else:
+            groups.append([note])
+    return groups
+
+
+@dataclass(frozen=True)
+class _VoicingCandidate:
+    pitches: tuple[int, ...]
+    mapped_voices: tuple[int, ...]
+    octave_offsets: tuple[int, ...]
+    local_cost: float
+
+
+def _voicing_candidates(pitches: list[int]) -> list[_VoicingCandidate]:
+    """Return old-style playable octave placements for one attack/chord."""
+    original = tuple(sorted(set(pitches)))
+    candidates: dict[tuple[int, ...], _VoicingCandidate] = {}
+    for anchor_octave in range(-12, 13):
+        mapped = tuple(fold_pitch(pitch + 12 * anchor_octave) for pitch in original)
+        rendered = tuple(sorted(set(mapped)))
+        offsets = tuple((target - source) // 12 for source, target in zip(original, mapped))
+        register_cost = sum(abs(target - source) for target, source in zip(mapped, original)) / 12.0
+        interval_cost = sum(
+            abs((mapped[index + 1] - mapped[index]) - (original[index + 1] - original[index]))
+            for index in range(len(original) - 1)
+        )
+        collapsed = len(original) - len(rendered)
+        offset_spread = max(offsets) - min(offsets) if offsets else 0
+        local_cost = (
+            register_cost * 0.35
+            + interval_cost * 2.5
+            + collapsed * 24.0
+            + offset_spread * 4.0
+        )
+        candidate = _VoicingCandidate(rendered, mapped, offsets, local_cost)
+        previous = candidates.get(rendered)
+        if previous is None or candidate.local_cost < previous.local_cost:
+            candidates[rendered] = candidate
+    return sorted(candidates.values(), key=lambda item: (item.local_cost, item.pitches))
+
+
+def _median_octave_offset(candidate: _VoicingCandidate) -> float:
+    return float(median(candidate.octave_offsets)) if candidate.octave_offsets else 0.0
+
+
+def _transition_cost(
+    previous_original: list[int],
+    previous: _VoicingCandidate,
+    current_original: list[int],
+    current: _VoicingCandidate,
+    gap: float,
+) -> float:
+    original_interval = current_original[-1] - previous_original[-1]
+    mapped_interval = current.mapped_voices[-1] - previous.mapped_voices[-1]
+    # A long gap starts a new phrase, so octave continuity matters less there.
+    phrase_weight = 0.05 if gap >= 1.25 else 1.0
+    interval_cost = abs(mapped_interval - original_interval) * 4.0 * phrase_weight
+    octave_change = abs(_median_octave_offset(current) - _median_octave_offset(previous))
+    change_cost = octave_change * 6.0 * phrase_weight
+    jump_cost = max(0, abs(mapped_interval) - 7) * 0.15 * phrase_weight
+    return interval_cost + change_cost + jump_cost
+
+
+def _smart_fold_candidates(clusters: list[tuple[float, list[int]]]) -> list[_VoicingCandidate]:
+    """Select the old smart strategy's best octave candidate for every attack."""
+    if not clusters:
+        return []
+    originals = [sorted(set(pitches)) for _start, pitches in clusters]
+    choices = [_voicing_candidates(pitches) for pitches in originals]
+    costs: list[list[float]] = [[candidate.local_cost for candidate in choices[0]]]
+    parents: list[list[int]] = [[-1 for _candidate in choices[0]]]
+
+    for index in range(1, len(clusters)):
+        row_costs: list[float] = []
+        row_parents: list[int] = []
+        gap = max(0.0, clusters[index][0] - clusters[index - 1][0])
+        for current in choices[index]:
+            best_cost = float("inf")
+            best_parent = 0
+            for parent_index, previous in enumerate(choices[index - 1]):
+                cost = (
+                    costs[index - 1][parent_index]
+                    + current.local_cost
+                    + _transition_cost(
+                        originals[index - 1], previous, originals[index], current, gap
+                    )
+                )
+                if cost < best_cost:
+                    best_cost = cost
+                    best_parent = parent_index
+            row_costs.append(best_cost)
+            row_parents.append(best_parent)
+        costs.append(row_costs)
+        parents.append(row_parents)
+
+    selected = [0] * len(clusters)
+    selected[-1] = min(range(len(costs[-1])), key=costs[-1].__getitem__)
+    for index in range(len(clusters) - 1, 0, -1):
+        selected[index - 1] = parents[index][selected[index]]
+    return [choices[index][selected[index]] for index in range(len(clusters))]
+
+
 @dataclass
 class ArrangeInfo:
     shift: int = 0       # semitones the whole piece was moved
@@ -216,32 +365,70 @@ class LyreNote:
     arpeggio: bool = False
 
 
-def arrange_events(notes: Sequence[NoteEvent]) -> tuple[list[LyreNote], ArrangeInfo]:
-    """Move the piece onto the lyre: transpose to C, black keys to white, fold into C3–B5."""
+def arrange_events(
+    notes: Sequence[NoteEvent],
+    range_strategy: str = RANGE_STRATEGY_DEFAULT,
+) -> tuple[list[LyreNote], ArrangeInfo]:
+    """Move notes onto the lyre using the selected range strategy."""
     info = ArrangeInfo(total=len(notes))
     if not notes:
         return [], info
-    shift = best_transpose([n.pitch for n in notes])
+    _validate_range_strategy(range_strategy)
+    shift_fn = best_transpose if range_strategy == RANGE_STRATEGY_MODERN else _old_best_transpose
+    shift = shift_fn([n.pitch for n in notes])
     info.shift = shift
+    transposed = [note.pitch + shift for note in notes]
+    mapped = [
+        NoteEvent(
+            snap_pitch(pitch),
+            note.start,
+            note.end,
+            note.part,
+            note.grace,
+            note.arpeggio,
+        )
+        for note, pitch in zip(notes, transposed)
+    ]
+    for pitch, moved in zip(transposed, mapped):
+        info.snapped += int(moved.pitch != pitch)
+
+    if range_strategy == RANGE_STRATEGY_MODERN:
+        folded_values = [fold_pitch(note.pitch) for note in mapped]
+    else:
+        groups = _cluster_event_groups(mapped)
+        clusters = [
+            (group[0].start, sorted({note.pitch for note in group})) for group in groups
+        ]
+        candidates = _smart_fold_candidates(clusters)
+        folded_values = [0] * len(mapped)
+        index_by_id = {id(note): index for index, note in enumerate(mapped)}
+        for group, candidate in zip(groups, candidates):
+            source_pitches = sorted({note.pitch for note in group})
+            pitch_map = dict(zip(source_pitches, candidate.mapped_voices))
+            for note in group:
+                folded_values[index_by_id[id(note)]] = pitch_map[note.pitch]
+
     out: list[LyreNote] = []
-    for note in notes:
-        moved = note.pitch + shift
-        snapped = snap_pitch(moved)
-        folded = fold_pitch(snapped)
-        info.snapped += int(snapped != moved)
-        info.folded += int(folded != snapped)
-        out.append(LyreNote(folded, moved, note.start, note.end, note.part, note.grace, note.arpeggio))
+    for note, pitch, folded in zip(mapped, transposed, folded_values):
+        info.folded += int(folded != note.pitch)
+        out.append(LyreNote(folded, pitch, note.start, note.end, note.part, note.grace, note.arpeggio))
     return out, info
 
 
-def arrange_with_info(notes: Sequence[NoteEvent]) -> tuple[list[tuple[float, list[int]]], ArrangeInfo]:
+def arrange_with_info(
+    notes: Sequence[NoteEvent],
+    range_strategy: str = RANGE_STRATEGY_DEFAULT,
+) -> tuple[list[tuple[float, list[int]]], ArrangeInfo]:
     """(onset in seconds, lyre pitches) groups; kept for scripts that only need onsets."""
-    lyre, info = arrange_events(notes)
+    lyre, info = arrange_events(notes, range_strategy)
     return cluster_notes([NoteEvent(n.key, n.start, n.end) for n in lyre]), info
 
 
-def arrange_notes(notes: Sequence[NoteEvent]) -> list[tuple[float, list[int]]]:
-    return arrange_with_info(notes)[0]
+def arrange_notes(
+    notes: Sequence[NoteEvent],
+    range_strategy: str = RANGE_STRATEGY_DEFAULT,
+) -> list[tuple[float, list[int]]]:
+    return arrange_with_info(notes, range_strategy)[0]
 
 
 @dataclass(frozen=True)
@@ -975,6 +1162,108 @@ def render_grid(layout: GridLayout, kind: str) -> str:
     return "\n".join(lines)
 
 
+FINGERTIP_SUBDIVISIONS_PER_BEAT = 4
+
+
+def _fingertip_group_token(pitches: list[int]) -> str:
+    tokens = "".join(pitch_to_key(pitch) for pitch in pitches)
+    return tokens if len(pitches) == 1 else "(" + tokens + ")"
+
+
+def _fingertip_event_bar_index(
+    q: float,
+    bars: list[tuple[float, float, MeterMark]],
+) -> int:
+    for index, (start, end, _meter) in enumerate(bars):
+        if start - 1e-8 <= q < end - 1e-9 or index == len(bars) - 1:
+            return index
+    return max(0, len(bars) - 1)
+
+
+def _group_fingertip_events(
+    located: list[tuple[float, list[int]]],
+    bars: list[tuple[float, float, MeterMark]],
+) -> dict[int, dict[int, list[list[int]]]]:
+    """Place attacks on the old format's sixteenth-note grid."""
+    grouped: dict[int, dict[int, list[list[int]]]] = defaultdict(lambda: defaultdict(list))
+    for q, pitches in sorted(located, key=lambda item: item[0]):
+        index = _fingertip_event_bar_index(q, bars)
+        start, end, meter = bars[index]
+        beat_q = _beat_quarters(meter)
+        slot_q = beat_q / FINGERTIP_SUBDIVISIONS_PER_BEAT
+        slot_count = max(1, int(round((end - start) / slot_q)))
+        slot = int(math.floor((q - start) / slot_q + 0.5))
+        if slot >= slot_count and index + 1 < len(bars):
+            index += 1
+            slot = 0
+        else:
+            slot = max(0, min(slot_count - 1, slot))
+        grouped[index][slot].append(pitches)
+    return grouped
+
+
+def _render_fingertip_half(slots: dict[int, list[list[int]]], first_slot: int) -> str:
+    first = "".join(_fingertip_group_token(pitches) for pitches in slots.get(first_slot, []))
+    second = "".join(_fingertip_group_token(pitches) for pitches in slots.get(first_slot + 1, []))
+    if first and second:
+        return first + second
+    if first:
+        return first
+    if second:
+        return " " + second
+    return "  "
+
+
+def _render_fingertip_bar(
+    start: float,
+    end: float,
+    meter: MeterMark,
+    slots: dict[int, list[list[int]]],
+    mark: str,
+) -> str:
+    beat_q = _beat_quarters(meter)
+    beat_count = max(1, int(round((end - start) / beat_q)))
+    parts = [mark]
+    for beat in range(beat_count):
+        base = beat * FINGERTIP_SUBDIVISIONS_PER_BEAT
+        parts.append(
+            _render_fingertip_half(slots, base)
+            + " "
+            + _render_fingertip_half(slots, base + 2)
+            + "/"
+        )
+    return "".join(parts)
+
+
+def fingertip_keyboard_section(
+    notes: Sequence[NoteEvent],
+    tempos: list[tuple[float, float]],
+    meters: list[MeterMark],
+    range_strategy: str = RANGE_STRATEGY_DEFAULT,
+) -> str:
+    """Render the legacy PianoConvert-main keyboard layout as an extra section."""
+    lyre, _info = arrange_events(notes, range_strategy)
+    clusters = cluster_notes([NoteEvent(n.key, n.start, n.end) for n in lyre])
+    if not clusters:
+        raise KeyboardScoreError("没有可转换的音符")
+    located = [(seconds_to_quarters(start, tempos), pitches) for start, pitches in clusters]
+    bars = _bars_until(max(q for q, _pitches in located), meters)
+    grouped = _group_fingertip_events(located, bars)
+    rendered: list[str] = []
+    previous_meter: MeterMark | None = None
+    previous_bpm: float | None = None
+    for index, (start, end, meter) in enumerate(bars):
+        bpm = bpm_at(quarters_to_seconds(start, tempos), tempos)
+        mark = _change_mark(previous_meter, meter, previous_bpm, bpm)
+        previous_meter, previous_bpm = meter, bpm
+        rendered.append(
+            _render_fingertip_bar(start, end, meter, grouped.get(index, {}), mark)
+        )
+        if (index + 1) % 4 == 0 and index + 1 < len(bars):
+            rendered.append("")
+    return "【指尖键盘谱】\n" + "\n".join(rendered) + "\n"
+
+
 def _constant_timeline(beat_sec: float, beats_per_bar: int) -> tuple[list[tuple[float, float]], list[MeterMark]]:
     bpm = 60.0 / beat_sec if beat_sec > 0 else 120.0
     return [(0.0, bpm)], [MeterMark(0.0, max(1, int(beats_per_bar)), 4)]
@@ -1022,11 +1311,12 @@ def keyboard_text(
     beats_per_bar: int = 4,
     strict: bool = True,
     style: str = STYLE_DETAILED,
+    range_strategy: str = RANGE_STRATEGY_DEFAULT,
 ) -> str:
     """The keyboard score of some notes (times in seconds)."""
     if tempos is None or meters is None:
         tempos, meters = _constant_timeline(beat_sec, beats_per_bar)
-    lyre, info = arrange_events(notes)
+    lyre, info = arrange_events(notes, range_strategy)
     if not lyre:
         raise KeyboardScoreError("没有可转换的音符")
     layout = layout_grid(lyre, tempos, meters, strict, style)
@@ -1426,24 +1716,49 @@ def notes_to_text(
     title: str,
     strict: bool = True,
     style: str = STYLE_DETAILED,
+    range_strategy: str = RANGE_STRATEGY_DEFAULT,
 ) -> str:
     if not notes:
         raise KeyboardScoreError("没有可转换的音符")
-    return keyboard_text(notes, title, tempos, meters, strict=strict, style=style)
+    return keyboard_text(
+        notes,
+        title,
+        tempos,
+        meters,
+        strict=strict,
+        style=style,
+        range_strategy=range_strategy,
+    )
 
 
-def midi_to_keyboard_text(path: Path, title: str, strict: bool = True, style: str = STYLE_DETAILED) -> str:
+def midi_to_keyboard_text(
+    path: Path,
+    title: str,
+    strict: bool = True,
+    style: str = STYLE_DETAILED,
+    range_strategy: str = RANGE_STRATEGY_DEFAULT,
+) -> str:
     notes, tempos, meters = notes_from_midi(path)
-    return notes_to_text(notes, tempos, meters, title, strict, style)
+    return notes_to_text(notes, tempos, meters, title, strict, style, range_strategy)
 
 
-def musicxml_to_keyboard_text(path: Path, title: str, strict: bool = True, style: str = STYLE_DETAILED) -> str:
+def musicxml_to_keyboard_text(
+    path: Path,
+    title: str,
+    strict: bool = True,
+    style: str = STYLE_DETAILED,
+    range_strategy: str = RANGE_STRATEGY_DEFAULT,
+) -> str:
     notes, tempos, meters = notes_from_musicxml(path)
-    return notes_to_text(notes, tempos, meters, title, strict, style)
+    return notes_to_text(notes, tempos, meters, title, strict, style, range_strategy)
 
 
 def score_file_to_keyboard_text(
-    path: Path, title: str | None = None, strict: bool = True, style: str = STYLE_DETAILED
+    path: Path,
+    title: str | None = None,
+    strict: bool = True,
+    style: str = STYLE_DETAILED,
+    range_strategy: str = RANGE_STRATEGY_DEFAULT,
 ) -> str:
     """Keyboard score of a MIDI / MusicXML file.
 
@@ -1457,7 +1772,23 @@ def score_file_to_keyboard_text(
     if style not in STYLES:
         style = STYLE_DETAILED
     if suffix in MIDI_SUFFIXES:
-        return midi_to_keyboard_text(path, stem, strict, style)
+        return midi_to_keyboard_text(path, stem, strict, style, range_strategy)
     if suffix in MUSICXML_SUFFIXES:
-        return musicxml_to_keyboard_text(path, stem, strict, style)
+        return musicxml_to_keyboard_text(path, stem, strict, style, range_strategy)
     raise KeyboardScoreError("无法读取这个乐谱文件")
+
+
+def fingertip_section_from_score_file(
+    path: Path,
+    range_strategy: str = RANGE_STRATEGY_DEFAULT,
+) -> str:
+    """Create the appended legacy-style fingertip keyboard section for a score file."""
+    path = Path(path)
+    suffix = path.suffix.lower()
+    if suffix in MIDI_SUFFIXES:
+        notes, tempos, meters = notes_from_midi(path)
+    elif suffix in MUSICXML_SUFFIXES:
+        notes, tempos, meters = notes_from_musicxml(path)
+    else:
+        raise KeyboardScoreError("无法读取这个乐谱文件")
+    return fingertip_keyboard_section(notes, tempos, meters, range_strategy)

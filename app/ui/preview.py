@@ -1,4 +1,4 @@
-"""Built-in preview of a keyboard score (键盘谱 .txt).
+"""Built-in preview of keyboard scores (键盘谱 .txt).
 
 The score is a plain-text grid: every beat of the 旋律 row sits exactly above the same
 beat of the 伴奏 row, counting East-Asian wide characters (旋律, 伴奏, 〔〕) as two columns
@@ -53,11 +53,18 @@ from app.ui.widgets import ElidedLabel, EmptyState, Segmented, chip, set_prop, t
 
 SECTION_KEYBOARD = "keyboard"
 SECTION_JIANPU = "jianpu"
+SECTION_FINGERTIP = "fingertip"
 SECTION_ALL = "all"
-SECTIONS = (SECTION_KEYBOARD, SECTION_JIANPU, SECTION_ALL)
-SECTION_LABELS = {SECTION_KEYBOARD: "键盘谱", SECTION_JIANPU: "简谱", SECTION_ALL: "全部"}
+SECTIONS = (SECTION_KEYBOARD, SECTION_JIANPU, SECTION_FINGERTIP, SECTION_ALL)
+SECTION_LABELS = {
+    SECTION_KEYBOARD: "键盘谱",
+    SECTION_JIANPU: "简谱",
+    SECTION_FINGERTIP: "指尖键盘谱",
+    SECTION_ALL: "全部",
+}
 JIANPU_MARK = "【简谱】"
 KEYBOARD_MARK = "【键盘谱】"
+FINGERTIP_MARK = "【指尖键盘谱】"
 
 ZOOM_LEVELS = (70, 80, 90, 100, 110, 125, 150, 175, 200)
 DEFAULT_ZOOM = 100
@@ -112,6 +119,8 @@ def split_sections(text: str) -> dict[str, str]:
             marks[SECTION_JIANPU] = index
         elif stripped == KEYBOARD_MARK and SECTION_KEYBOARD not in marks:
             marks[SECTION_KEYBOARD] = index
+        elif stripped == FINGERTIP_MARK and SECTION_FINGERTIP not in marks:
+            marks[SECTION_FINGERTIP] = index
     sections = {SECTION_ALL: text.rstrip("\n")}
     order = sorted(marks.items(), key=lambda kv: kv[1])
     for n, (name, start) in enumerate(order):
@@ -547,7 +556,7 @@ class ScoreFooter(QFrame):
 
 
 class PreviewPanel(QWidget):
-    """Header (title, meta, 键盘谱 / 简谱 / 全部), the score view and its actions."""
+    """Header (title, meta, score section), the score view and its actions."""
 
     copied = Signal()
     zoom_changed = Signal(int)
@@ -590,14 +599,20 @@ class PreviewPanel(QWidget):
 
         self.keyboard_radio = QRadioButton(SECTION_LABELS[SECTION_KEYBOARD])
         self.jianpu_radio = QRadioButton(SECTION_LABELS[SECTION_JIANPU])
+        self.fingertip_radio = QRadioButton(SECTION_LABELS[SECTION_FINGERTIP])
         self.all_radio = QRadioButton(SECTION_LABELS[SECTION_ALL])
         self.keyboard_radio.setToolTip("只看键盘谱（电脑按键）")
         self.jianpu_radio.setToolTip("只看简谱（数字）")
+        self.fingertip_radio.setToolTip("只看旧版格式的指尖键盘谱")
         self.all_radio.setToolTip("整个文件，包括开头的说明")
-        self.section_segment = Segmented([self.keyboard_radio, self.jianpu_radio, self.all_radio], compact=True)
+        self.section_segment = Segmented(
+            [self.keyboard_radio, self.jianpu_radio, self.fingertip_radio, self.all_radio],
+            compact=True,
+        )
         self._section_radios = {
             SECTION_KEYBOARD: self.keyboard_radio,
             SECTION_JIANPU: self.jianpu_radio,
+            SECTION_FINGERTIP: self.fingertip_radio,
             SECTION_ALL: self.all_radio,
         }
         self._section_radios[self._section].setChecked(True)

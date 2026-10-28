@@ -51,6 +51,7 @@ def _redirect_homr_models() -> None:
     dest = model_dir()
     import homr.main as homr_main
     import homr.segmentation.config as seg
+    import homr.segmentation.inference_segnet as segnet_inference
     import homr.transformer.configs as cfg
 
     def _move(path: str) -> str:
@@ -60,11 +61,32 @@ def _redirect_homr_models() -> None:
     seg.segnet_path_onnx_fp16 = _move(seg.segnet_path_onnx_fp16)
     homr_main.segnet_path_onnx = seg.segnet_path_onnx
     homr_main.segnet_path_onnx_fp16 = seg.segnet_path_onnx_fp16
+    # inference_segnet imports these paths by value, so updating only config.py
+    # and homr.main leaves the inference class pointed at site-packages.
+    segnet_inference.segnet_path_onnx = seg.segnet_path_onnx
+    segnet_inference.segnet_path_onnx_fp16 = seg.segnet_path_onnx_fp16
     files = cfg.default_config.filepaths
     files.encoder_path = _move(files.encoder_path)
     files.decoder_path = _move(files.decoder_path)
     files.encoder_path_fp16 = _move(files.encoder_path_fp16)
     files.decoder_path_fp16 = _move(files.decoder_path_fp16)
+
+    # HOMR creates a fresh Config for each staff; redirect those paths too, while
+    # leaving tokenizer assets beside the installed package.
+    original_config_init = cfg.Config.__init__
+    if not getattr(original_config_init, "_pianoconvert_model_paths", False):
+        def _config_init(self, *args, **kwargs):
+            original_config_init(self, *args, **kwargs)
+            for name in (
+                "encoder_path",
+                "decoder_path",
+                "encoder_path_fp16",
+                "decoder_path_fp16",
+            ):
+                setattr(self.filepaths, name, _move(getattr(self.filepaths, name)))
+
+        _config_init._pianoconvert_model_paths = True
+        cfg.Config.__init__ = _config_init
 
 
 def homr_entry(image_path: str) -> None:

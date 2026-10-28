@@ -43,9 +43,9 @@ Windows 桌面程序 · 中文界面 · 本地运行
 1. 把文件拖进窗口，或点击选择文件（`Ctrl+O`）。
 2. 如果是歌曲录音，选择乐器类型（钢琴 / 其他乐器）和计算设备（CPU / GPU）。
 3. 选择键盘谱样式（详细 / 简洁），点 **开始转换**（`Ctrl+Enter`）。转换中可以随时取消。
-4. 转完后在右侧预览键盘谱，可以直接复制，或者打开文件、打开所在文件夹。
+4. 选择键盘谱样式和音域处理方式，点击 **开始转换**。转完后在右侧预览键盘谱，可以直接复制，或者打开文件、打开所在文件夹。
 
-每次转换的结果放在 `文档\PianoConvert\Output\<歌名>_<日期时间>\`，每次都有四样：键盘谱 `<歌名>_键盘谱.txt`、MIDI、MusicXML 和五线谱 PDF。来源是 PDF 时，五线谱 PDF 就是原来的 PDF；其他来源的五线谱 PDF 由软件排版生成。以前的转换都在右侧「记录」里，可以搜索、预览和重新打开。
+每次转换的结果放在 `文档\PianoConvert\Output\<歌名>_<日期时间>\`，包括键盘谱 `<歌名>_键盘谱.txt`，以及 MIDI、MusicXML（视来源而定）。以前的转换都在右侧「记录」里，可以搜索、预览和重新打开。
 
 ## 键盘谱长什么样
 
@@ -70,7 +70,7 @@ Windows 桌面程序 · 中文界面 · 本地运行
 | `0` | 不响（休止） |
 | `〔3/4〕` `〔♩=60〕` | 从这一小节起改拍号、改速度 |
 
-键盘谱文件里还有一段一格对一格的【简谱】。完整说明见 [键盘谱记法](docs/键盘谱记法.md)。
+键盘谱文件包含一格对一格的【简谱】、新版【键盘谱】，以及附在末尾的旧版格式【指尖键盘谱】。完整说明见 [键盘谱记法](docs/键盘谱记法.md)。
 
 ## 识别效果
 
@@ -92,6 +92,9 @@ C 大调和 A 小调的曲子不会移调。别的调会整首移到 C 调白键
 
 **和弦太多按不过来？**
 用「详细」样式，先只弹上面「旋律」那一行，熟了再加伴奏。
+
+**音域处理怎么选？**
+默认使用新版逐音八度折叠：每个音独立移进 C3–B5。也可以选择旧版智能乐句移调，尽量保持旋律和弦的整体八度。两种方式都会把黑键改成相邻白键，选择会被记住；生成谱头会写入本次处理的移调、改键和折叠统计。
 
 **谱头写着 ♩=90「只是默认值」？**
 这份 PDF 上没有印速度，软件用了默认的每分钟 90 拍，可以按自己的感觉调整快慢。
@@ -169,7 +172,6 @@ PianoConvert 使用了这些开源项目（版权和许可证归各自作者所�
 | [music21](https://github.com/cuthbertLab/music21) | MusicXML 读写 | BSD-3-Clause |
 | [pretty_midi](https://github.com/craffel/pretty-midi)、[mido](https://github.com/mido/mido) | MIDI 读写 | MIT |
 | [pypdfium2](https://github.com/pypdfium2-team/pypdfium2) | 读取 PDF | Apache-2.0 / BSD-3-Clause |
-| [Verovio](https://www.verovio.org/) | 排版五线谱 PDF | LGPL-3.0 |
 | [PySide6](https://doc.qt.io/qtforpython-6/) | 界面 | LGPL-3.0 |
 | [PyTorch](https://pytorch.org/)、[ONNX Runtime](https://onnxruntime.ai/)、[librosa](https://librosa.org/)、[OpenCV](https://opencv.org/) | 推理和音频、图像处理 | BSD-3-Clause / MIT / ISC / Apache-2.0 |
 

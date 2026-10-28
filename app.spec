@@ -91,7 +91,6 @@ hiddenimports = [
     "rapidocr",
 ]
 hiddenimports += MUSIC21_RUNTIME_PACKAGES
-hiddenimports += ["verovio", "PySide6.QtSvg"]
 
 datas = [
     (
@@ -113,8 +112,7 @@ datas += collect_data_files("basic_pitch")
 datas += collect_data_files("resampy")
 
 binaries = []
-# verovio engraves the staff-notation PDF (its data folder holds the music fonts)
-for _pkg in ("homr", "musicxml", "rapidocr", "pypdfium2", "verovio"):
+for _pkg in ("homr", "musicxml", "rapidocr", "pypdfium2"):
     try:
         pkg_datas, pkg_binaries, pkg_hidden = collect_all(_pkg)
     except Exception:
