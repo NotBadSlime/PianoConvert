@@ -52,7 +52,7 @@ def test_success_writes_midi_and_musicxml(tmp_path):
     assert result.midi_path.exists()
     assert result.musicxml_path.exists()
     assert result.keyboard_path.exists()
-    assert "【数字谱】" in result.keyboard_path.read_text(encoding="utf-8")
+    assert "【简谱】" in result.keyboard_path.read_text(encoding="utf-8")
     assert "<score-partwise" in result.musicxml_path.read_text(encoding="utf-8")
     assert result.folder.name.startswith("tune_")
 
@@ -161,7 +161,7 @@ def test_run_score_from_midi(tmp_path):
     assert result.kind == "score"
     assert result.keyboard_path.exists()
     text = result.keyboard_path.read_text(encoding="utf-8")
-    assert "【数字谱】" in text
+    assert "【简谱】" in text
     assert "【键盘谱】" in text
     assert result.midi_path.exists()
     assert not result.musicxml_path.exists()

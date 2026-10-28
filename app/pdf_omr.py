@@ -460,10 +460,36 @@ def _recognize_jianpu(images: list[Path], dest: Path, cancel: Event, progress: P
     return jianpu.write_midi(score, dest)
 
 
+VECTOR_SUFFIX = "_vector.mid"
+JIANPU_SUFFIX = "_jianpu.mid"
+
+
+def _read_vector(pdf: Path, dest: Path, cancel: Event, progress: Progress) -> Path | None:
+    """Notes straight from the PDF drawing (exact) when the PDF draws its symbols with a
+    music font; None when it does not, so image recognition is used instead."""
+    from app import pdf_vector
+
+    if pdf.suffix.lower() not in PDF_ONLY_SUFFIXES or not pdf_vector.is_vector_score(pdf):
+        return None
+    progress("读取 PDF 谱面", 0.4)
+    try:
+        score = pdf_vector.read_vector_pdf(pdf, MAX_PAGES, cancel)
+    except pdf_vector.VectorScoreError:
+        return None
+    return pdf_vector.write_midi(score, dest)
+
+
 def recognize_pdf(pdf: Path, work_dir: Path, cancel: Event, on_progress: Progress | None = None) -> Path:
-    """Recognise a score PDF / image. Returns MusicXML for staff notation, or MIDI for jianpu."""
+    """Recognise a score PDF / image.
+
+    Returns MIDI read from the PDF's vector drawing when possible (``*_vector.mid``), MIDI for
+    jianpu (``*_jianpu.mid``), otherwise MusicXML from image recognition of staff notation.
+    """
     progress = on_progress or (lambda _m, _p: None)
     work_dir.mkdir(parents=True, exist_ok=True)
+    vector = _read_vector(pdf, work_dir / f"{pdf.stem}{VECTOR_SUFFIX}", cancel, progress)
+    if vector is not None:
+        return vector
     pages_dir = work_dir / "_omr_pages"
     if pages_dir.exists():
         shutil.rmtree(pages_dir, ignore_errors=True)
@@ -473,7 +499,7 @@ def recognize_pdf(pdf: Path, work_dir: Path, cancel: Event, on_progress: Progres
         if cancel.is_set():
             raise CancelledError()
         if _is_jianpu(images):
-            return _recognize_jianpu(images, work_dir / f"{pdf.stem}_jianpu.mid", cancel, progress)
+            return _recognize_jianpu(images, work_dir / f"{pdf.stem}{JIANPU_SUFFIX}", cancel, progress)
         _run_homr(pages_dir, len(images), cancel, progress)
         page_xmls = [img.with_suffix(".musicxml") for img in images]
         page_xmls = [xml for xml in page_xmls if xml.is_file()]

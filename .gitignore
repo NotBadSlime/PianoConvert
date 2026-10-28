@@ -7,4 +7,10 @@ dist/
 installer/output/
 Output/
 models/*.pth
+
+# local evaluation data, reports and notes (never published)
 .eval/
+verify/
+docs/superpowers/
+docs/转换准确率校验报告.md
+docs/开源乐谱识别项目调研.md

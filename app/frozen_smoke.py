@@ -40,7 +40,7 @@ def check_imports() -> list[str]:
         import pypdfium2  # noqa: F401
         from rapidocr import RapidOCR  # noqa: F401
 
-        from app import jianpu, pdf_omr  # noqa: F401
+        from app import jianpu, pdf_omr, pdf_vector  # noqa: F401
     except Exception as exc:  # noqa: BLE001
         errors.append(f"score recognition: {exc}")
     try:

@@ -37,9 +37,34 @@ def load_items() -> list[HistoryItem]:
     return [item_from_row(row) for row in raw]
 
 
-def append_item(item: HistoryItem) -> None:
+def _write(items: list[HistoryItem]) -> None:
     path = history_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps([asdict(x) for x in items], ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def append_item(item: HistoryItem) -> None:
     items = load_items()
     items.append(item)
-    path.write_text(json.dumps([asdict(x) for x in items], ensure_ascii=False, indent=2), encoding="utf-8")
+    _write(items)
+
+
+def remove_item(item_id: str) -> tuple[HistoryItem, int] | None:
+    """Drop one record from the history (the converted files stay where they are).
+
+    Returns the removed item and its position, for ``restore_item``; None when no record has that id.
+    """
+    items = load_items()
+    for index, item in enumerate(items):
+        if item.id == item_id:
+            del items[index]
+            _write(items)
+            return item, index
+    return None
+
+
+def restore_item(item: HistoryItem, index: int) -> None:
+    """Put a removed record back where it was (undo of ``remove_item``)."""
+    items = [x for x in load_items() if x.id != item.id]
+    items.insert(max(0, min(int(index), len(items))), item)
+    _write(items)

@@ -33,6 +33,10 @@ def history_path() -> Path:
     return base / "PianoConvert" / "history.json"
 
 
+def settings_path() -> Path:
+    return history_path().with_name("settings.json")
+
+
 def make_output_dir(source: Path) -> Path:
     folder = output_root() / f"{safe_stem(source.name)}_{_now_stamp()}"
     folder.mkdir(parents=True, exist_ok=True)

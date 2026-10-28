@@ -28,15 +28,22 @@ def main() -> None:
         install_gpu_main()
         return
 
+    from PySide6.QtCore import QLibraryInfo, QTranslator
     from PySide6.QtWidgets import QApplication
 
     from app.ui.main_window import MainWindow
-    from app.ui.styles import APP_QSS
 
     app = QApplication([])
-    app.setStyleSheet(APP_QSS)
-    win = MainWindow()
-    win.resize(860, 760)
+    # Fusion draws every control from our palette, so the light and dark themes look the same everywhere.
+    app.setStyle("Fusion")
+    translator = QTranslator(app)
+    if translator.load("qtbase_zh_CN", QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)):
+        app.installTranslator(translator)  # 是 / 否, 复制 / 粘贴 in Qt's own dialogs and menus
+    win = MainWindow()  # applies the remembered theme (跟随系统 / 浅色 / 深色) to the whole app
+    screen = app.primaryScreen()
+    if screen is not None:
+        free = screen.availableGeometry()
+        win.resize(min(1100, free.width() - 40), min(760, free.height() - 60))
     win.show()
     app.exec()
 

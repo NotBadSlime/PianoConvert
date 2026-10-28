@@ -123,6 +123,12 @@ def test_run_pdf_converts_jianpu_image(tmp_path):
     assert result.midi_path.is_file()
     text = result.keyboard_path.read_text(encoding="utf-8")
     assert "简谱自动识别" in text
-    num = text.split("【数字谱】")[1].split("【键盘谱】")[0].strip()
-    # beat 1: right-hand 1 with left-hand low 5; beat 2: right-hand 2 with low 1
-    assert num.startswith("(-51)  (-12)")
+    num = text.split("【简谱】")[1].split("【键盘谱】")[0].strip()
+    # the right hand is the tune row, the left hand the accompaniment row
+    # beat 1: right-hand 1 over left-hand low 5; beat 2: right-hand 2 over low 1
+    tune, accomp = num.splitlines()[:2]
+    assert "旋律" in tune and "伴奏" in accomp
+    tune_beats = tune.split("|")[1].split()
+    accomp_beats = accomp.split("|")[1].split()
+    assert tune_beats[0].startswith("1") and tune_beats[1].startswith("2")
+    assert accomp_beats[0].startswith("5\u0323") and accomp_beats[1].startswith("1\u0323")

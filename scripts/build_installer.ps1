@@ -1,4 +1,4 @@
-param([string]$Version = "0.5.3")
+param([string]$Version = "0.7.0")
 $ErrorActionPreference = "Stop"
 Set-Location "$PSScriptRoot\.."
 & "$PSScriptRoot\build_exe.ps1"
