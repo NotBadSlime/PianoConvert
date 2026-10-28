@@ -13,3 +13,4 @@ torchaudio
 setuptools>=65,<81
 pytest>=8.0
 pyinstaller>=6.0
+verovio>=4.3

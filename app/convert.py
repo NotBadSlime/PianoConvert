@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,7 +16,7 @@ from app.keyboard_score import (
 )
 from app.paths import safe_stem
 from app.pdf_omr import IMAGE_SUFFIXES, PDF_SUFFIXES, VECTOR_SUFFIX, PdfOmrError, count_staves, recognize_pdf
-from app.score_io import midi_to_musicxml
+from app.score_io import midi_to_musicxml, musicxml_to_midi, musicxml_to_pdf
 
 AUDIO_SUFFIXES = {".mp3", ".wav", ".flac", ".ogg", ".m4a"}
 
@@ -35,6 +36,7 @@ class ConvertResult:
     kind: str
     source_path: Path
     keyboard_path: Path
+    pdf_path: Path | None = None  # the score as staff notation (the original PDF for a PDF)
 
 
 def humanize_error(exc: BaseException) -> str:
@@ -67,8 +69,14 @@ def _work_name(source: Path) -> str:
     return f"{safe_stem(source.name)}{source.suffix.lower()}"
 
 
-def _write_keyboard(midi_or_score: Path, dest: Path, title: str, strict: bool = True, style: str = STYLE_DETAILED) -> None:
-    dest.write_text(score_file_to_keyboard_text(midi_or_score, title, strict=strict, style=style), encoding="utf-8")
+def _keyboard_text(midi_or_score: Path, title: str, strict: bool = True, style: str = STYLE_DETAILED) -> str:
+    return score_file_to_keyboard_text(midi_or_score, title, strict=strict, style=style)
+
+
+def _write_keyboard(midi_or_score: Path, dest: Path, title: str, strict: bool = True, style: str = STYLE_DETAILED) -> str:
+    text = _keyboard_text(midi_or_score, title, strict=strict, style=style)
+    dest.write_text(text, encoding="utf-8")
+    return text
 
 
 def _with_note(text: str, note: str) -> str:
@@ -77,6 +85,64 @@ def _with_note(text: str, note: str) -> str:
     if not sep:
         return note + text
     return head + "\n" + note.rstrip("\n") + sep + rest
+
+
+def _grid_divisors(keyboard_text: str) -> tuple[int, ...] | None:
+    """The keyboard score's grid as music21 quantization (cells per quarter note), so the
+    MusicXML / PDF written from a MIDI file shows the same rhythm as the keyboard score."""
+    head = re.search(r"(\d+)/(\d+)\s+♩=\S+\s+每拍 (\d+) 格", keyboard_text or "")
+    if not head:
+        return None
+    per_quarter = int(head.group(3)) * int(head.group(2)) / 4
+    return (int(per_quarter),) if per_quarter >= 1 and per_quarter == int(per_quarter) else None
+
+
+def _fatal(exc: BaseException) -> bool:
+    if isinstance(exc, (CancelledError, ConvertError)):
+        return True
+    return isinstance(exc, OSError) and getattr(exc, "errno", None) in {13, 28}
+
+
+def _complete_outputs(
+    midi_path: Path,
+    xml_path: Path,
+    pdf_path: Path,
+    keyboard_text: str,
+    progress,
+    cancel: Event,
+    errors: list[str],
+    title: str = "",
+) -> None:
+    """Every conversion ends with all four files: MIDI, MusicXML, a staff-notation PDF and
+    the keyboard score. Whatever the source did not give is made from the others."""
+    if not midi_path.exists() and xml_path.exists():
+        try:
+            progress("写入 MIDI", 0.84)
+            musicxml_to_midi(xml_path, midi_path)
+        except Exception as exc:  # noqa: BLE001
+            if _fatal(exc):
+                raise
+            errors.append("MIDI 导出失败")
+    if cancel.is_set():
+        raise CancelledError()
+    if not xml_path.exists() and midi_path.exists():
+        try:
+            progress("写入 MusicXML", 0.88)
+            midi_to_musicxml(midi_path, xml_path, _grid_divisors(keyboard_text))
+        except Exception as exc:  # noqa: BLE001
+            if _fatal(exc):
+                raise
+            errors.append(f"谱面导出失败：{exc}"[:200])
+    if cancel.is_set():
+        raise CancelledError()
+    if not pdf_path.exists() and xml_path.exists():
+        try:
+            progress("写入五线谱 PDF", 0.94)
+            musicxml_to_pdf(xml_path, pdf_path, title or None)
+        except Exception as exc:  # noqa: BLE001
+            if _fatal(exc):
+                raise
+            errors.append("五线谱 PDF 导出失败")
 
 
 def run(
@@ -101,6 +167,7 @@ def run(
     work = safe_stem(source.name)
     midi_path = folder / f"{work}.mid"
     xml_path = folder / f"{work}.musicxml"
+    pdf_path = folder / f"{work}.pdf"
     keyboard_path = folder / f"{work}_键盘谱.txt"
     audio_copy = folder / _work_name(source)
     progress = on_progress or (lambda _m, _p: None)
@@ -109,11 +176,11 @@ def run(
         if folder.exists():
             shutil.rmtree(folder, ignore_errors=True)
         return ConvertResult(
-            "cancelled", folder, midi_path, xml_path, err, source.stem, kind, source, keyboard_path
+            "cancelled", folder, midi_path, xml_path, err, source.stem, kind, source, keyboard_path, pdf_path
         )
 
     def _pack(status: str, error: str) -> ConvertResult:
-        return ConvertResult(status, folder, midi_path, xml_path, error, source.stem, kind, source, keyboard_path)
+        return ConvertResult(status, folder, midi_path, xml_path, error, source.stem, kind, source, keyboard_path, pdf_path)
 
     try:
         if cancel.is_set():
@@ -128,19 +195,11 @@ def run(
         if not midi_path.exists():
             raise RuntimeError("引擎没有写出 MIDI")
         errors: list[str] = []
+        text = ""
         try:
-            progress("写入 MusicXML", 0.85)
-            midi_to_musicxml(midi_path, xml_path)
-        except Exception as exc:  # noqa: BLE001
-            if isinstance(exc, (CancelledError, ConvertError)):
-                raise
-            if isinstance(exc, OSError) and getattr(exc, "errno", None) in {13, 28}:
-                raise
-            errors.append(f"谱面导出失败：{exc}"[:200])
-        try:
-            progress("写入键盘谱", 0.92)
+            progress("写入键盘谱", 0.8)
             # transcribed from audio: onsets are not on a grid
-            _write_keyboard(midi_path, keyboard_path, work, strict=False, style=style)
+            text = _write_keyboard(midi_path, keyboard_path, work, strict=False, style=style)
         except Exception as exc:  # noqa: BLE001
             if isinstance(exc, CancelledError):
                 raise
@@ -148,6 +207,7 @@ def run(
                 errors.append("无法写入输出目录")
             else:
                 errors.append("键盘谱导出失败")
+        _complete_outputs(midi_path, xml_path, pdf_path, text, progress, cancel, errors, source.stem)
         if errors:
             return _pack("partial", "；".join(errors))
         progress("完成", 1.0)
@@ -181,6 +241,7 @@ def run_score(
     work = safe_stem(source.name)
     copied = folder / _work_name(source)
     keyboard_path = folder / f"{work}_键盘谱.txt"
+    pdf_path = folder / f"{work}.pdf"
     if suffix in {".mid", ".midi"}:
         midi_path = copied
         xml_path = folder / f"{work}.musicxml"
@@ -194,11 +255,11 @@ def run_score(
         if folder.exists():
             shutil.rmtree(folder, ignore_errors=True)
         return ConvertResult(
-            "cancelled", folder, midi_path, xml_path, err, source.stem, kind, source, keyboard_path
+            "cancelled", folder, midi_path, xml_path, err, source.stem, kind, source, keyboard_path, pdf_path
         )
 
     def _pack(status: str, error: str) -> ConvertResult:
-        return ConvertResult(status, folder, midi_path, xml_path, error, source.stem, kind, source, keyboard_path)
+        return ConvertResult(status, folder, midi_path, xml_path, error, source.stem, kind, source, keyboard_path, pdf_path)
 
     try:
         if cancel.is_set():
@@ -207,8 +268,12 @@ def run_score(
         shutil.copy2(source, copied)
         if cancel.is_set():
             return _cancelled_result()
-        progress("写入键盘谱", 0.6)
-        _write_keyboard(copied, keyboard_path, work, style=style)
+        progress("写入键盘谱", 0.5)
+        text = _write_keyboard(copied, keyboard_path, work, style=style)
+        errors: list[str] = []
+        _complete_outputs(midi_path, xml_path, pdf_path, text, progress, cancel, errors, source.stem)
+        if errors:
+            return _pack("partial", "；".join(errors))
         progress("完成", 1.0)
         return _pack("success", "")
     except CancelledError:
@@ -246,6 +311,9 @@ def run_pdf(
     xml_path = folder / f"{work}.musicxml"
     keyboard_path = folder / f"{work}_键盘谱.txt"
     midi_path = folder / f"{work}.mid"
+    is_image = source.suffix.lower() in IMAGE_SUFFIXES
+    # a PDF is its own staff-notation PDF; a picture gets one engraved from the reading
+    pdf_path = folder / f"{work}.pdf" if is_image else copied
     kind = "pdf"
     progress = on_progress or (lambda _m, _p: None)
     run_recognize = recognize or (
@@ -256,16 +324,15 @@ def run_pdf(
         if folder.exists():
             shutil.rmtree(folder, ignore_errors=True)
         return ConvertResult(
-            "cancelled", folder, midi_path, xml_path, err, source.stem, kind, source, keyboard_path
+            "cancelled", folder, midi_path, xml_path, err, source.stem, kind, source, keyboard_path, pdf_path
         )
 
     def _pack(status: str, error: str) -> ConvertResult:
-        return ConvertResult(status, folder, midi_path, xml_path, error, source.stem, kind, source, keyboard_path)
+        return ConvertResult(status, folder, midi_path, xml_path, error, source.stem, kind, source, keyboard_path, pdf_path)
 
     try:
         if cancel.is_set():
             return _cancelled_result()
-        is_image = source.suffix.lower() in IMAGE_SUFFIXES
         progress("读取图片" if is_image else "读取 PDF", 0.1)
         shutil.copy2(source, copied)
         progress("识别乐谱", 0.15)
@@ -293,6 +360,10 @@ def run_pdf(
             if not is_midi and count_staves(xml_path) > 2:
                 note += "# 注意：这份谱每行超过两行五线谱（多半是人声 + 钢琴），这类谱容易认错位，结果可能偏差较大。\n"
         keyboard_path.write_text(_with_note(text, note), encoding="utf-8")
+        errors: list[str] = []
+        _complete_outputs(midi_path, xml_path, pdf_path, text, progress, cancel, errors, source.stem)
+        if errors:
+            return _pack("partial", "；".join(errors))
         progress("完成", 1.0)
         return _pack("success", "")
     except CancelledError:

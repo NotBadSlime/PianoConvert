@@ -45,7 +45,7 @@ Windows 桌面程序 · 中文界面 · 本地运行
 3. 选择键盘谱样式（详细 / 简洁），点 **开始转换**（`Ctrl+Enter`）。转换中可以随时取消。
 4. 转完后在右侧预览键盘谱，可以直接复制，或者打开文件、打开所在文件夹。
 
-每次转换的结果放在 `文档\PianoConvert\Output\<歌名>_<日期时间>\`，包括键盘谱 `<歌名>_键盘谱.txt`，以及 MIDI、MusicXML（视来源而定）。以前的转换都在右侧「记录」里，可以搜索、预览和重新打开。
+每次转换的结果放在 `文档\PianoConvert\Output\<歌名>_<日期时间>\`，每次都有四样：键盘谱 `<歌名>_键盘谱.txt`、MIDI、MusicXML 和五线谱 PDF。来源是 PDF 时，五线谱 PDF 就是原来的 PDF；其他来源的五线谱 PDF 由软件排版生成。以前的转换都在右侧「记录」里，可以搜索、预览和重新打开。
 
 ## 键盘谱长什么样
 
@@ -169,6 +169,7 @@ PianoConvert 使用了这些开源项目（版权和许可证归各自作者所�
 | [music21](https://github.com/cuthbertLab/music21) | MusicXML 读写 | BSD-3-Clause |
 | [pretty_midi](https://github.com/craffel/pretty-midi)、[mido](https://github.com/mido/mido) | MIDI 读写 | MIT |
 | [pypdfium2](https://github.com/pypdfium2-team/pypdfium2) | 读取 PDF | Apache-2.0 / BSD-3-Clause |
+| [Verovio](https://www.verovio.org/) | 排版五线谱 PDF | LGPL-3.0 |
 | [PySide6](https://doc.qt.io/qtforpython-6/) | 界面 | LGPL-3.0 |
 | [PyTorch](https://pytorch.org/)、[ONNX Runtime](https://onnxruntime.ai/)、[librosa](https://librosa.org/)、[OpenCV](https://opencv.org/) | 推理和音频、图像处理 | BSD-3-Clause / MIT / ISC / Apache-2.0 |
 

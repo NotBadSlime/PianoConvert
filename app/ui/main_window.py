@@ -306,6 +306,8 @@ class HistoryRow(QWidget):
         self.midi_button.setToolTip("打开 MIDI")
         self.xml_button = QPushButton("MusicXML")
         self.xml_button.setToolTip("打开 MusicXML")
+        self.pdf_button = QPushButton("PDF")
+        self.pdf_button.setToolTip("打开五线谱 PDF")
         self.keyboard_button = QPushButton("打开键盘谱")
         self.keyboard_button.setToolTip("用记事本等程序打开（双击这一条也可以）")
         self.folder_button = QPushButton("打开文件夹")
@@ -315,6 +317,7 @@ class HistoryRow(QWidget):
             (self.folder_button, item.folder),
             (self.midi_button, item.midi_path),
             (self.xml_button, item.musicxml_path),
+            (self.pdf_button, getattr(item, "pdf_path", "")),
         )
         buttons = QHBoxLayout()
         buttons.setContentsMargins(0, 0, 0, 0)
@@ -1571,6 +1574,7 @@ class MainWindow(QMainWindow):
             folder=str(result.folder),
             error=result.error or "",
             keyboard_path=str(getattr(result, "keyboard_path", "") or ""),
+            pdf_path=str(getattr(result, "pdf_path", "") or ""),
         )
         append_item(item)
         return item
