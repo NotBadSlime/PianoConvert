@@ -308,9 +308,9 @@ class HistoryRow(QWidget):
         self.xml_button.setToolTip("打开 MusicXML")
         self.pdf_button = QPushButton("PDF")
         self.pdf_button.setToolTip("打开五线谱 PDF")
-        self.keyboard_button = QPushButton("打开键盘谱")
+        self.keyboard_button = QPushButton("键盘谱")
         self.keyboard_button.setToolTip("用记事本等程序打开（双击这一条也可以）")
-        self.folder_button = QPushButton("打开文件夹")
+        self.folder_button = QPushButton("文件夹")
         self.folder_button.setToolTip("打开这次结果所在的文件夹")
         targets = (
             (self.keyboard_button, item.keyboard_path),

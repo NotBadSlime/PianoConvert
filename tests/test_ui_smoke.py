@@ -72,7 +72,7 @@ def test_partial_row_disables_musicxml(tmp_path, monkeypatch):
     assert row.xml_button.isEnabled() is False
     assert row.midi_button.isEnabled() is True
     assert row.keyboard_button.isEnabled() is False
-    assert row.folder_button.text() == "打开文件夹"
+    assert row.folder_button.text() == "文件夹"
     assert row.sizeHint().width() <= 360
 
 
