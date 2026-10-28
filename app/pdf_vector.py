@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import bisect
 import ctypes
+import math
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -148,6 +149,7 @@ class PageDrawing:
     curves: list[Curve]
     width: float
     height: float
+    smufl: bool = False  # drawn by MuseScore or another SMuFL program
 
 
 def _font_name(tp, index: int) -> str:
@@ -158,12 +160,154 @@ def _font_name(tp, index: int) -> str:
     return buf.value.decode("latin-1", errors="replace")
 
 
+# ---------------------------------------------------------------- SMuFL fonts (MuseScore ...)
+#
+# MuseScore and other notation programs draw with a SMuFL music font (Leland, Bravura ...)
+# through a scaled coordinate system, and draw beams as filled shapes. Such a page is
+# translated into the same drawing the reader knows: glyphs get their MusicFont codes and
+# sizes (a normal notehead = 20), line widths are taken through the scaling, and beams,
+# repeat dots and tremolo strokes become the lines the MusicFont pages use for them.
+
+SMUFL_FONTS = ("Leland", "Bravura", "Petaluma", "Emmentaler", "MScore", "Gootville", "MuseJazz", "Finale Maestro", "FinaleMaestro", "Leipzig", "Sebastian")
+SMUFL_CODES = {
+    0xE0A4: HEAD_BLACK, 0xE0A3: HEAD_HALF, 0xE0A2: HEAD_WHOLE, 0xE0A0: HEAD_BREVE, 0xE0A1: HEAD_BREVE,
+    0xE1E7: DOT,
+    0xE050: CLEF_TREBLE, 0xE07A: CLEF_TREBLE, 0xE052: CLEF_TREBLE_8VB, 0xE053: CLEF_TREBLE_8VA,
+    0xE062: CLEF_BASS, 0xE07C: CLEF_BASS, 0xE064: CLEF_BASS_8VB, 0xE05C: CLEF_ALTO, 0xE07B: CLEF_ALTO,
+    0xE262: SHARP, 0xE260: FLAT, 0xE261: NATURAL, 0xE263: DOUBLE_SHARP, 0xE264: DOUBLE_FLAT,
+    0xE240: 0x149, 0xE242: 0x14A, 0xE244: 0x14B, 0xE246: 0x14C,   # flags, stem up
+    0xE241: 0x159, 0xE243: 0x15A, 0xE245: 0x15B, 0xE247: 0x15C,   # flags, stem down
+    0xE4E2: 0x160, 0xE4E3: 0x161, 0xE4E4: 0x162, 0xE4E5: 0x163, 0xE4E6: 0x164, 0xE4E7: 0x165,
+    0xE4E8: 0x166, 0xE4E9: 0x167, 0xE4F4: 0x161, 0xE4F5: 0x162,  # rests (also outside the staff)
+    0xE08A: COMMON_TIME, 0xE08B: CUT_TIME,
+    0xEAA9: ARPEGGIO, 0xEAAA: ARPEGGIO, 0xEAAB: ARPEGGIO, 0xEAAC: ARPEGGIO,
+    0xECA5: 0x143, 0xECA3: 0x144, 0xECA7: 0x145,                  # metronome-mark notes
+    0xE510: 0x1B4, 0xE511: 0x1B4, 0xE512: 0x1B5, 0xE51C: 0x1B5, 0xE514: 0x1B6, 0xE515: 0x1B6, 0xE516: 0x1B7,
+}
+SMUFL_CODES.update({0xE080 + d: 0x130 + d for d in range(10)})   # time-signature digits
+SMUFL_HEADS = (0xE0A4, 0xE0A3, 0xE0A2)
+SMUFL_REPEAT_DOT = 0xE044
+SMUFL_TREMOLO = {0xE220: 1, 0xE221: 2, 0xE222: 3, 0xE223: 4, 0xE224: 5}
+# text sizes are scaled so that MuseScore's tuplet numbers land where MusicFont pages put theirs
+SMUFL_TEXT_SCALE = 1.6
+
+
+def _is_smufl(font: str) -> bool:
+    return any(name in font for name in SMUFL_FONTS)
+
+
+def _smufl_glyphs(chars: list[tuple]) -> tuple[list[Glyph], list[Line]]:
+    head_sizes = Counter(round(c[7], 1) for c in chars if _is_smufl(c[8]) and c[0] in SMUFL_HEADS)
+    base = head_sizes.most_common(1)[0][0] if head_sizes else 20.0
+    k = 20.0 / base if base > 0 else 1.0
+    glyphs: list[Glyph] = []
+    lines: list[Line] = []
+    for code, ox, oy, l, b, r, t, size, font, ch in chars:
+        if not _is_smufl(font):
+            glyphs.append(Glyph(code, ox, oy, l, b, r, t, size * k * SMUFL_TEXT_SCALE, False, ch))
+            continue
+        if code == SMUFL_REPEAT_DOT:
+            cx, cy = (l + r) / 2, (b + t) / 2
+            lines.append(Line(cx, cy, cx, cy, 4.0))
+            continue
+        if code in SMUFL_TREMOLO:
+            n = SMUFL_TREMOLO[code]
+            for i in range(n):
+                y = t - (t - b) * (i + 0.5) / n
+                lines.append(Line(l, y, r, y, 5.0))
+            continue
+        mapped = SMUFL_CODES.get(code)
+        if mapped is not None:
+            glyphs.append(Glyph(mapped, ox, oy, l, b, r, t, size * k, True, ch))
+    return glyphs, lines
+
+
+def _smufl_shape(pts: list[tuple[int, float, float]], fill: bool, stroke: bool, width: float, lines: list[Line], curves: list[Curve]) -> None:
+    """Straight pieces of a stroked path; beams, stems and thick barlines drawn as filled
+    shapes; slurs and ties (filled shapes with curves)."""
+    bezier = any(p[0] == 1 for p in pts)
+    if stroke and not fill:
+        prev = None
+        for kind, x, y in pts:
+            if kind == 0 and prev is not None:
+                lines.append(Line(prev[0], prev[1], x, y, width))
+            prev = (x, y)
+        return
+    if not fill:
+        return
+    if bezier:
+        if len(pts) >= 4:
+            curves.append(Curve(pts[0][1], pts[0][2], pts[3][1], pts[3][2]))
+        return
+    xs = [p[1] for p in pts]
+    ys = [p[2] for p in pts]
+    w, h = max(xs) - min(xs), max(ys) - min(ys)
+    if len(pts) < 4 or w > 400 or w < 0.05 and h < 0.05:
+        return  # the page background, or nothing
+    if h > 2.5 * w:
+        cx = (min(xs) + max(xs)) / 2
+        lines.append(Line(cx, min(ys), cx, max(ys), w))   # a stem or a thick barline
+        return
+    left = sorted(pts, key=lambda p: p[1])[:2]
+    right = sorted(pts, key=lambda p: p[1])[-2:]
+    yl = sum(p[2] for p in left) / 2
+    yr = sum(p[2] for p in right) / 2
+    lines.append(Line(min(xs), yl, max(xs), yr, 5.0))         # a beam
+
+
+def _smufl_object_chars(page, tp) -> list[tuple]:
+    """Music glyphs of a SMuFL page, one per text object.
+
+    PDFium's text page drops a glyph that repeats the previous one at an overlapping spot
+    (it takes it for fake bold), which loses the second notehead of a chord in a third.
+    The text objects are all there: such an object reads as empty text, and it is the
+    same glyph as the object before it when its box has the same size.
+    """
+    import pypdfium2.raw as raw
+
+    out: list[tuple] = []
+    last: dict[str, tuple[int, float, float]] = {}
+    for obj in page.get_objects(max_depth=5):
+        if obj.type != raw.FPDF_PAGEOBJ_TEXT:
+            continue
+        buf = ctypes.create_string_buffer(256)
+        raw.FPDFFont_GetBaseFontName(raw.FPDFTextObj_GetFont(obj.raw), buf, 256)
+        font = buf.value.decode("latin-1", errors="replace")
+        if not _is_smufl(font):
+            continue
+        l, b, r, t = (ctypes.c_float() for _ in range(4))
+        raw.FPDFPageObj_GetBounds(obj.raw, ctypes.byref(l), ctypes.byref(b), ctypes.byref(r), ctypes.byref(t))
+        box = (l.value, b.value, r.value, t.value)
+        matrix = raw.FS_MATRIX()
+        raw.FPDFPageObj_GetMatrix(obj.raw, ctypes.byref(matrix))
+        size = ctypes.c_float()
+        raw.FPDFTextObj_GetFontSize(obj.raw, ctypes.byref(size))
+        n = raw.FPDFTextObj_GetText(obj.raw, tp.raw, None, 0)
+        text_buf = ctypes.create_string_buffer(n * 2 + 2)
+        raw.FPDFTextObj_GetText(obj.raw, tp.raw, ctypes.cast(text_buf, ctypes.POINTER(ctypes.c_ushort)), n * 2 + 2)
+        text = text_buf.raw[: max(0, n * 2 - 2)].decode("utf-16-le", errors="replace")
+        codes = [ord(c) for c in text if ord(c) > 0x20]
+        w, h = box[2] - box[0], box[3] - box[1]
+        if codes:
+            code = codes[0]
+        else:
+            prev = last.get(font)
+            if prev is None or abs(prev[1] - w) > 0.15 or abs(prev[2] - h) > 0.15:
+                continue
+            code = prev[0]
+        last[font] = (code, w, h)
+        # small notes (grace, cue) are drawn through a smaller matrix, not a smaller font size
+        scale = math.sqrt(abs(matrix.a * matrix.d - matrix.b * matrix.c)) or 1.0
+        out.append((code, matrix.e, matrix.f, box[0], box[1], box[2], box[3], size.value * scale, font, chr(code)))
+    return out
+
+
 def read_drawing(page) -> PageDrawing:
     import pypdfium2.raw as raw
 
     width, height = page.get_size()
     tp = page.get_textpage()
-    glyphs: list[Glyph] = []
+    chars: list[tuple] = []
     for i in range(tp.count_chars()):
         ch = tp.get_text_range(i, 1)
         if not ch or not ch.strip():
@@ -171,12 +315,25 @@ def read_drawing(page) -> PageDrawing:
         l, b, r, t = tp.get_charbox(i)
         ox, oy = ctypes.c_double(), ctypes.c_double()
         raw.FPDFText_GetCharOrigin(tp.raw, i, ctypes.byref(ox), ctypes.byref(oy))
-        font = _font_name(tp, i)
-        glyphs.append(
-            Glyph(ord(ch[0]), ox.value, oy.value, l, b, r, t, raw.FPDFText_GetFontSize(tp.raw, i), MUSIC_FONT in font, ch)
-        )
+        chars.append((ord(ch[0]), ox.value, oy.value, l, b, r, t, raw.FPDFText_GetFontSize(tp.raw, i), _font_name(tp, i), ch))
+    smufl = any(_is_smufl(c[8]) for c in chars) and not any(MUSIC_FONT in c[8] for c in chars)
+    if smufl:
+        music = _smufl_object_chars(page, tp)
+        # the text page reports font sizes before the page's scaling; measure that scaling
+        # on the noteheads and apply it to the text too
+        raw_heads = Counter(round(c[7], 1) for c in chars if _is_smufl(c[8]) and c[0] in SMUFL_HEADS)
+        eff_heads = Counter(round(c[7], 2) for c in music if c[0] in SMUFL_HEADS)
+        text_scale = 1.0
+        if raw_heads and eff_heads:
+            text_scale = eff_heads.most_common(1)[0][0] / raw_heads.most_common(1)[0][0]
+        texts = [c[:7] + (c[7] * text_scale,) + c[8:] for c in chars if not _is_smufl(c[8])]
+        chars = texts + music
     lines: list[Line] = []
     curves: list[Curve] = []
+    if smufl:
+        glyphs, lines = _smufl_glyphs(chars)
+    else:
+        glyphs = [Glyph(code, ox, oy, l, b, r, t, size, MUSIC_FONT in font, ch) for code, ox, oy, l, b, r, t, size, font, ch in chars]
     for obj in page.get_objects(max_depth=4):
         if obj.type != 2:  # path
             continue
@@ -195,6 +352,10 @@ def read_drawing(page) -> PageDrawing:
         raw.FPDFPath_GetDrawMode(obj.raw, ctypes.byref(fill), ctypes.byref(stroke))
         w = ctypes.c_float()
         raw.FPDFPageObj_GetStrokeWidth(obj.raw, ctypes.byref(w))
+        if smufl:
+            scale = math.sqrt(abs(matrix.a * matrix.d - matrix.b * matrix.c)) or 1.0
+            _smufl_shape(pts, bool(fill.value), bool(stroke.value), float(w.value) * scale, lines, curves)
+            continue
         if count == 2 and stroke.value and pts[1][0] == 0:
             lines.append(Line(pts[0][1], pts[0][2], pts[1][1], pts[1][2], float(w.value)))
         elif fill.value and count >= 4 and any(p[0] == 1 for p in pts):
@@ -204,7 +365,28 @@ def read_drawing(page) -> PageDrawing:
     page_close = getattr(tp, "close", None)
     if page_close:
         page_close()
-    return PageDrawing(glyphs, lines, curves, width, height)
+    if smufl:
+        lines = _join_staff_segments(lines)
+    return PageDrawing(glyphs, lines, curves, width, height, smufl)
+
+
+def _join_staff_segments(lines: list[Line]) -> list[Line]:
+    """MuseScore draws staff lines bar by bar; join pieces that continue each other."""
+    flat = sorted((ln for ln in lines if ln.horizontal and ln.width <= 1.6), key=lambda ln: (round(ln.y0, 1), ln.xmin))
+    others = [ln for ln in lines if not (ln.horizontal and ln.width <= 1.6)]
+    joined: list[Line] = []
+    for ln in flat:
+        last = joined[-1] if joined else None
+        if (
+            last is not None
+            and abs(last.y0 - ln.y0) <= 0.05
+            and abs(last.width - ln.width) <= 0.05
+            and -0.5 <= ln.xmin - last.xmax <= 0.6
+        ):
+            joined[-1] = Line(last.xmin, last.y0, max(last.xmax, ln.xmax), last.y0, last.width)
+        else:
+            joined.append(Line(ln.xmin, ln.y0, ln.xmax, ln.y0, ln.width))
+    return joined + others
 
 
 def is_vector_score(pdf: Path, pages: int = 2) -> bool:
@@ -419,6 +601,7 @@ class Bar:
     x1: float = 0.0
     start_q: float = 0.0  # onset in the played-out score (first pass)
     volta_open: bool = False  # its ending bracket runs on past the end of the line
+    tempo: float = 0.0  # a metronome mark printed over this bar
 
 @dataclass
 class StaffState:
@@ -976,6 +1159,25 @@ def analyze_system(
                         lo, hi = min(lo, other.xmin), max(hi, other.xmax)
             else:
                 lo, hi = g.cx - 14, g.cx + 14
+        # The number belongs to the staff whose notes under the bracket add up to a tuplet
+        # (3 eighths, 3 quarters ...). A bracket under the upper staff's notes can be nearer
+        # to the lower staff; when both or neither add up, the nearest staff keeps it.
+        def adds_up(staff: Staff) -> bool:
+            total = 0.0
+            for s in stems:
+                if lo - 7 <= s.line.x0 <= hi + 1.5 and _nearest_staff(system, s.heads[0].y) is staff:
+                    base = min(h.kind for h in s.heads)
+                    total += base if base >= 2.0 else 0.5 ** max(s.beams, s.flags)
+            for r in music:
+                if r.code in RESTS and lo - 7 <= r.x <= hi + 1.5 and staff_of.get(id(r)) is staff:
+                    total += RESTS[r.code]
+            if total <= 0:
+                return False
+            unit = total / n
+            return abs(math.log2(unit) - round(math.log2(unit))) < 0.01
+        fitting = [x for x in system if adds_up(x)] if drawing.smufl else []
+        if len(fitting) == 1:
+            st = fitting[0]
         affected = [s for s in stems if lo - 7 <= s.line.x0 <= hi + 1.5 and _nearest_staff(system, s.heads[0].y) is st]
         for s in affected:
             s.tuplet = ratio
@@ -1375,6 +1577,7 @@ class VectorScore:
     bars: int
     timeline: list = field(default_factory=list)  # (start_q, Bar) as played
     tempo_printed: bool = True
+    tempos: list = field(default_factory=list)  # (start_q, bpm) changes after the first
 
 
 def _number_voltas(bars: list[Bar]) -> None:
@@ -1494,8 +1697,16 @@ def build_score(all_bars: list[Bar], bpm: float) -> VectorScore:
     meters.append((0.0, played[0].meter if played else (4, 4)))
     held: dict[tuple[int, int], ScoreNote] = {}
     timeline: list = []
+    tempos: list[tuple[float, float]] = []
+    current = bpm
     for bar in played:
         timeline.append((q, bar))
+        if bar.tempo and abs(bar.tempo - (current or 0.0)) >= 0.5:
+            if q <= 1e-6 or not current:
+                bpm = current = bar.tempo
+            else:
+                tempos.append((q, bar.tempo))
+                current = bar.tempo
         if not meters or meters[-1][1] != bar.meter:
             meters.append((q, bar.meter))
         for ev in sorted(bar.events, key=lambda e: (e.t, e.x)):
@@ -1535,11 +1746,13 @@ def build_score(all_bars: list[Bar], bpm: float) -> VectorScore:
         q += bar.length
     if not notes:
         raise VectorScoreError("没有读出音符")
-    return VectorScore(notes, meters, bpm or DEFAULT_BPM, len(played), timeline, tempo_printed=bpm > 0)
+    return VectorScore(notes, meters, bpm or DEFAULT_BPM, len(played), timeline, tempo_printed=bpm > 0, tempos=tempos)
 
 
-def _tempo_of(drawing: PageDrawing) -> float:
-    """A metronome mark: a note glyph followed by '= 72'."""
+def _tempo_marks(drawing: PageDrawing) -> list[tuple[float, float, float]]:
+    """Metronome marks of a page as (x, y, bpm), in reading order: a note glyph followed
+    by '= 72'."""
+    out: list[tuple[float, float, float]] = []
     marks = [g for g in drawing.glyphs if g.music and g.code in (0x143, 0x144, 0x145)]
     for m in marks:
         texts = sorted(
@@ -1549,8 +1762,29 @@ def _tempo_of(drawing: PageDrawing) -> float:
         s = "".join(g.text for g in texts)
         found = re.search(r"=\s*(\d{2,3})", s)
         if found:
-            return float(found.group(1))
-    return 0.0
+            out.append((m.x, m.y, float(found.group(1))))
+    return sorted(out, key=lambda mark: (-mark[1], mark[0]))
+
+
+def _tempo_of(drawing: PageDrawing) -> float:
+    """The first metronome mark of a page, 0 when there is none."""
+    marks = _tempo_marks(drawing)
+    return marks[0][2] if marks else 0.0
+
+
+def _mark_tempo_bars(marks: list[tuple[float, float, float]], systems: list[list[Staff]], bars: list[Bar]) -> None:
+    """Each metronome mark belongs to the bar it is printed over."""
+    for x, y, bpm in marks:
+        over = [(i, s) for i, s in enumerate(systems) if s[0].top - 1 <= y <= s[0].top + 16 * s[0].space]
+        if not over:
+            continue
+        i, _system = min(over, key=lambda item: y - item[1][0].top)
+        line = [b for b in bars if b.system == i]
+        if not line:
+            continue
+        target = next((b for b in line if b.x0 - 2 <= x < b.x1), line[0] if x < line[0].x0 else None)
+        if target is not None:
+            target.tempo = bpm
 
 
 def read_vector_pdf(pdf: Path, max_pages: int = 40, cancel=None) -> VectorScore:
@@ -1570,18 +1804,22 @@ def read_vector_pdf(pdf: Path, max_pages: int = 40, cancel=None) -> VectorScore:
 
                 raise CancelledError()
             drawing = read_drawing(doc[index])
-            if not bpm:
-                bpm = _tempo_of(drawing)
+            marks = _tempo_marks(drawing)
+            if not bpm and marks:
+                bpm = marks[0][2]
             staves = find_staves(drawing)
             if not staves:
                 continue
             systems = group_systems(drawing, staves)
+            page_bars: list[Bar] = []
             for sys_index, system in enumerate(systems):
                 above = systems[sys_index - 1][-1].bottom if sys_index > 0 else None
                 below = systems[sys_index + 1][0].top if sys_index + 1 < len(systems) else None
                 for bar in analyze_system(drawing, system, state, above, below):
                     bar.page, bar.system = index, sys_index
-                    all_bars.append(bar)
+                    page_bars.append(bar)
+            _mark_tempo_bars(marks, systems, page_bars)
+            all_bars += page_bars
     finally:
         doc.close()
     if not all_bars:
@@ -1598,15 +1836,29 @@ def write_midi(score: VectorScore, dest: Path) -> Path:
 
     Text events carry what the notes alone cannot say (read by app.keyboard_score):
     which track has the tune, grace notes, rolled chords, and a missing tempo mark (the
-    MIDI still needs some tempo: DEFAULT_BPM).
+    MIDI still needs some tempo: DEFAULT_BPM). Tempo changes printed later in the score
+    are written as tempo changes.
     """
     import pretty_midi
 
-    bpm = score.bpm
-    sec = 60.0 / bpm
-    pm = pretty_midi.PrettyMIDI(initial_tempo=bpm)
+    marks = [(0.0, score.bpm)] + [(q, bpm) for q, bpm in score.tempos if q > 1e-6 and bpm > 0]
+    starts = [0.0]
+    for (q0, bpm0), (q1, _bpm1) in zip(marks, marks[1:]):
+        starts.append(starts[-1] + (q1 - q0) * 60.0 / bpm0)
+
+    def seconds(q: float) -> float:
+        i = bisect.bisect_right([m[0] for m in marks], q) - 1
+        i = max(0, i)
+        return starts[i] + (q - marks[i][0]) * 60.0 / marks[i][1]
+
+    pm = pretty_midi.PrettyMIDI(initial_tempo=score.bpm)
+    if len(marks) > 1:
+        res = pm.resolution
+        pm._tick_scales = [(int(round(q * res)), 60.0 / (bpm * res)) for q, bpm in marks]
+        last_q = max((n.end_q for n in score.notes), default=0.0)
+        pm._update_tick_to_time(int(round((last_q + 8) * res)))
     for q, (num, den) in score.meters:
-        pm.time_signature_changes.append(pretty_midi.TimeSignature(num, den, q * sec))
+        pm.time_signature_changes.append(pretty_midi.TimeSignature(num, den, seconds(q)))
     if not score.tempo_printed:
         pm.text_events.append(pretty_midi.Text(TEMPO_NOT_PRINTED, 0.0))
     staves = sorted({n.staff for n in score.notes})
@@ -1616,17 +1868,18 @@ def write_midi(score: VectorScore, dest: Path) -> Path:
     for n in score.notes:
         pitch = max(0, min(127, n.pitch))
         if n.grace:
-            pm.text_events.append(pretty_midi.Text(f"{ANNOTATION}grace:{pitch}", n.start_q * sec))
+            pm.text_events.append(pretty_midi.Text(f"{ANNOTATION}grace:{pitch}", seconds(n.start_q)))
         elif n.arpeggio:
             rolled[round(n.start_q, 6)].add(pitch)
     for q, pitches in sorted(rolled.items()):
         if len(pitches) >= 2:
-            pm.text_events.append(pretty_midi.Text(f"{ANNOTATION}arpeggio:" + ",".join(map(str, sorted(pitches))), q * sec))
+            pm.text_events.append(pretty_midi.Text(f"{ANNOTATION}arpeggio:" + ",".join(map(str, sorted(pitches))), seconds(q)))
     for st in staves:
         inst = pretty_midi.Instrument(program=0, name=f"Staff {st + 1}")
         for n in score.notes:
             if n.staff == st:
-                inst.notes.append(pretty_midi.Note(80, max(0, min(127, n.pitch)), n.start_q * sec, max(n.end_q, n.start_q + 0.0625) * sec))
+                end = max(n.end_q, n.start_q + 0.0625)
+                inst.notes.append(pretty_midi.Note(80, max(0, min(127, n.pitch)), seconds(n.start_q), seconds(end)))
         pm.instruments.append(inst)
     dest.parent.mkdir(parents=True, exist_ok=True)
     pm.write(str(dest))

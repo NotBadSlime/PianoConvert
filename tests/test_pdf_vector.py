@@ -167,3 +167,58 @@ def test_midi_carries_graces_rolls_and_the_tune(tmp_path):
     text = keyboard_text(notes, "carry", tempos, meters)
     rows = text.split("【键盘谱】")[1].strip().splitlines()
     assert rows == ["1 旋律 | Q wE T     - |", "  伴奏 | 0 0  {ZCB} - |"]
+
+def test_smufl_glyphs_get_musicfont_codes_and_sizes():
+    font = "ABCDEF+Leland"
+    chars = [
+        (0xE0A4, 100.0, 700.0, 100.0, 697.4, 106.5, 702.6, 20.0, font, "\ue0a4"),   # black head
+        (0xE0A4, 120.0, 700.0, 120.0, 698.2, 124.5, 701.8, 14.0, font, "\ue0a4"),   # small head
+        (0xE1E7, 108.0, 700.0, 108.0, 699.0, 110.0, 701.0, 20.0, font, "\ue1e7"),   # dot
+        (0xE044, 90.0, 702.5, 89.0, 701.5, 91.0, 703.5, 20.0, font, "\ue044"),      # repeat dot
+        (0xE222, 104.0, 690.0, 101.0, 686.0, 107.0, 694.0, 20.0, font, "\ue222"),   # 3 tremolo strokes
+        (0x33, 130.0, 720.0, 129.0, 716.0, 133.0, 724.0, 9.0, "Edwin-Italic", "3"),  # tuplet number
+    ]
+    glyphs, lines = pv._smufl_glyphs(chars)
+    assert [(g.code, round(g.size, 1), g.music) for g in glyphs] == [
+        (pv.HEAD_BLACK, 20.0, True), (pv.HEAD_BLACK, 14.0, True), (pv.DOT, 20.0, True), (0x33, 14.4, False)
+    ]
+    assert sum(1 for ln in lines if ln.width == 4.0 and ln.x0 == ln.x1) == 1   # repeat dot
+    assert sum(1 for ln in lines if ln.width == 5.0) == 3                        # tremolo strokes
+
+
+def test_smufl_shapes_become_reader_lines():
+    lines: list[Line] = []
+    curves: list = []
+    # a filled beam (slanted parallelogram), a filled thick barline, a stroked tuplet bracket
+    pv._smufl_shape([(2, 100, 700), (0, 140, 704), (0, 140, 701.5), (0, 100, 697.5)], True, False, 0.0, lines, curves)
+    pv._smufl_shape([(2, 300, 640), (0, 302.7, 640), (0, 302.7, 700), (0, 300, 700)], True, False, 0.0, lines, curves)
+    pv._smufl_shape([(2, 200, 726), (0, 200, 729), (0, 230, 729), (0, 230, 726)], False, True, 0.6, lines, curves)
+    beam, barline = lines[0], lines[1]
+    assert beam.width == 5.0 and beam.x0 == 100 and beam.x1 == 140 and abs(beam.y0 - 698.75) < 1e-6
+    assert barline.vertical and abs(barline.width - 2.7) < 1e-6
+    assert [(ln.x0, ln.y0, ln.x1, ln.y1) for ln in lines[2:]] == [(200, 726, 200, 729), (200, 729, 230, 729), (230, 729, 230, 726)]
+
+
+def test_staff_lines_drawn_bar_by_bar_are_joined():
+    pieces = [Line(40, 700, 150, 700, 0.55), Line(150, 700, 260, 700, 0.55), Line(260.2, 700, 300, 700, 0.55)]
+    joined = pv._join_staff_segments(pieces + [Line(150, 690, 150, 710, 0.9)])
+    flat = [ln for ln in joined if ln.horizontal]
+    assert [(ln.xmin, ln.xmax) for ln in flat] == [(40, 300)]
+
+
+def test_tempo_changes_are_written_to_the_midi(tmp_path):
+    import pretty_midi
+
+    S = pv.ScoreNote
+    score = pv.VectorScore(
+        notes=[S(60, float(i), i + 0.9, 0) for i in range(8)],
+        meters=[(0.0, (4, 4))],
+        bpm=120.0,
+        bars=2,
+        tempos=[(4.0, 60.0)],
+    )
+    pm = pretty_midi.PrettyMIDI(str(pv.write_midi(score, tmp_path / "tempo.mid")))
+    times, bpms = pm.get_tempo_changes()
+    assert [round(t, 3) for t in times] == [0.0, 2.0] and [round(b) for b in bpms] == [120, 60]
+    starts = sorted(n.start for n in pm.instruments[0].notes)
+    assert [round(s, 3) for s in starts] == [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0]
