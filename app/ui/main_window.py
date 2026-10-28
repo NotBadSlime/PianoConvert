@@ -42,6 +42,7 @@ from app.ui import icons
 from app.ui.preview import KIND_GLYPHS, KIND_LABELS, STATUS_LABELS, PreviewPanel, format_time
 from app.ui.theme import MODE_DARK, MODE_LIGHT, MODE_SYSTEM, MODES, ThemeManager, apply_window_frame
 from app.ui.widgets import (
+    ArtworkHeader,
     DropZone,
     ElidedLabel,
     Segmented,
@@ -527,9 +528,13 @@ class MainWindow(QMainWindow):
             widget.installEventFilter(self)
 
     def _build_header(self) -> QWidget:
-        header = QWidget()
-        row = QHBoxLayout(header)
-        row.setContentsMargins(2, 0, 0, 0)
+        header = ArtworkHeader()
+        self._artwork_header = header
+        column = QVBoxLayout(header)
+        column.setContentsMargins(20, 16, 20, 16)
+        column.setSpacing(12)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(12)
         self.app_badge = QLabel()
         self.app_badge.setObjectName("appBadge")
@@ -544,6 +549,9 @@ class MainWindow(QMainWindow):
         hero.setObjectName("hero")
         subtitle = QLabel("音频、MIDI、MusicXML，或 PDF / 图片五线谱，一键生成原神键盘谱")
         subtitle.setObjectName("subtitle")
+        subtitle.setWordWrap(True)
+        subtitle.setMinimumWidth(420)
+        subtitle.setMaximumWidth(475)
         titles = QVBoxLayout()
         titles.setContentsMargins(0, 0, 0, 0)
         titles.setSpacing(2)
@@ -568,8 +576,10 @@ class MainWindow(QMainWindow):
             radio.toggled.connect(lambda on, m=mode: on and self.set_theme_mode(m))
 
         row.addWidget(self.app_badge, 0, Qt.AlignmentFlag.AlignVCenter)
-        row.addLayout(titles, 1)
-        row.addWidget(self.theme_switch, 0, Qt.AlignmentFlag.AlignVCenter)
+        row.addLayout(titles)
+        row.addStretch(1)
+        column.addLayout(row)
+        column.addWidget(self.theme_switch, 0, Qt.AlignmentFlag.AlignLeft)
         return header
 
     def _build_convert_card(self) -> QFrame:
@@ -1044,6 +1054,7 @@ class MainWindow(QMainWindow):
     def _on_theme_changed(self, _name: str) -> None:
         tokens = self.theme.tokens
         self._root.set_tokens(tokens)
+        self._artwork_header.set_tokens(tokens)
         self.toast.set_tokens(tokens)
         self.progress_bar.set_tokens(tokens)
         self.preview.set_tokens(tokens)

@@ -15,7 +15,7 @@ from PySide6.QtCore import (
     QVariantAnimation,
     Signal,
 )
-from PySide6.QtGui import QColor, QLinearGradient, QMouseEvent, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QLinearGradient, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFrame,
@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.ui import icons
+from app.paths import asset_path
 from app.ui.theme import LIGHT, RADIUS
 
 
@@ -112,6 +113,44 @@ class ShadowRoot(QWidget):
             rect = QRectF(QRect(top_left, widget.size()))
             paint_soft_shadow(painter, rect.adjusted(1, 1, -1, -1), RADIUS["xl"], self._tokens["shadow"],
                               self._tokens["shadow_alpha"], blur=14, offset_y=4)
+        painter.end()
+
+
+class ArtworkHeader(QWidget):
+    """Cropped wallpaper with a quiet, theme-aware area behind the header text."""
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._artwork = QPixmap(str(asset_path("venti-background.png")))
+        self._tokens = LIGHT
+        self.setFixedHeight(154)
+
+    def set_tokens(self, tokens: dict) -> None:
+        self._tokens = tokens
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        clip = QPainterPath()
+        clip.addRoundedRect(QRectF(self.rect()), RADIUS["xl"], RADIUS["xl"])
+        painter.setClipPath(clip)
+        painter.fillRect(self.rect(), QColor(self._tokens["surface"]))
+        if not self._artwork.isNull():
+            width = min(620, self.width() * 0.70)
+            height = width * self._artwork.height() / self._artwork.width()
+            painter.drawPixmap(QRectF(self.width() - width, -height * 0.15, width, height),
+                               self._artwork, QRectF(self._artwork.rect()))
+        wash = QLinearGradient(0, 0, self.width(), 0)
+        base = QColor(self._tokens["surface"])
+        wash.setColorAt(0, base)
+        wash.setColorAt(0.43, base)
+        faded = QColor(base)
+        faded.setAlpha(20 if self._tokens["name"] == "light" else 85)
+        wash.setColorAt(0.78, faded)
+        wash.setColorAt(1, faded)
+        painter.fillRect(self.rect(), wash)
         painter.end()
 
 

@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version like 0.2.0 (without v prefix)"
+        description: "Version like 1.0.0 or 1.0.0-beta.1 (without v prefix)"
         required: true
 
 jobs:
@@ -39,14 +39,13 @@ jobs:
       - name: Resolve version
         id: version
         shell: pwsh
+        env:
+          RELEASE_EVENT: ${{ github.event_name }}
+          RELEASE_REF: ${{ github.ref_name }}
+          RELEASE_INPUT: ${{ github.event.inputs.version }}
         run: |
-          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
-            $ver = "${{ github.event.inputs.version }}".TrimStart("v")
-          } else {
-            $ver = "${{ github.ref_name }}".TrimStart("v")
-          }
-          "value=$ver" >> $env:GITHUB_OUTPUT
-          "tag=v$ver" >> $env:GITHUB_OUTPUT
+          python scripts/resolve_release_version.py --event-name "$env:RELEASE_EVENT" --ref-name "$env:RELEASE_REF" --input-version "$env:RELEASE_INPUT" --github-output "$env:GITHUB_OUTPUT"
+          if ($LASTEXITCODE -ne 0) { throw "Invalid release version" }
       - run: pip install -r requirements.txt pyinstaller
       - run: pip install "setuptools>=65,<81"
       - run: pip install --ignore-requires-python --no-deps homr==0.7.0
@@ -66,10 +65,24 @@ jobs:
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path $iscc)) { $iscc = "${env:ProgramFiles}\Inno Setup 6\ISCC.exe" }
           if (-not (Test-Path $iscc)) { throw "ISCC.exe not found after Inno Setup install" }
-          & $iscc /DMyAppVersion=${{ steps.version.outputs.value }} installer\PianoConvert.iss
+          & $iscc /DMyAppVersion=${{ steps.version.outputs.plain }} /DMyAppNumericVersion=${{ steps.version.outputs.numeric }} installer\PianoConvert.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+      - name: Installer checksum
+        shell: pwsh
+        run: |
+          $file = Get-Item "installer/output/PianoConvertSetup-${{ steps.version.outputs.plain }}.exe"
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
+          "$hash  $($file.Name)" | Set-Content -Encoding ascii "installer/output/SHA256SUMS.txt"
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
-          files: installer/output/PianoConvertSetup-*.exe
+          name: PianoConvert ${{ steps.version.outputs.plain }}
+          prerelease: ${{ steps.version.outputs.prerelease == 'true' }}
+          make_latest: ${{ steps.version.outputs.prerelease == 'true' && 'false' || 'true' }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            installer/output/PianoConvertSetup-${{ steps.version.outputs.plain }}.exe
+            installer/output/SHA256SUMS.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

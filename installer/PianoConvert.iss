@@ -1,6 +1,9 @@
 #define MyAppName "PianoConvert"
 #ifndef MyAppVersion
-  #define MyAppVersion "0.7.0"
+  #define MyAppVersion "1.0.0-beta.1"
+#endif
+#ifndef MyAppNumericVersion
+  #define MyAppNumericVersion "1.0.0"
 #endif
 #define MyAppExeName "PianoConvert.exe"
 
@@ -8,6 +11,7 @@
 AppId={{A7C2E4D1-9B18-4F3A-8C55-7B3E9D2A1F04}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
+VersionInfoVersion={#MyAppNumericVersion}
 DefaultDirName={autopf}\PianoConvert
 DefaultGroupName=PianoConvert
 OutputDir=output

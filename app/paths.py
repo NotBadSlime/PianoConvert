@@ -44,9 +44,14 @@ def make_output_dir(source: Path) -> Path:
 
 
 def app_icon_path() -> Path:
+    return asset_path("PianoConvert.ico")
+
+
+def asset_path(filename: str) -> Path:
+    """Resolve bundled artwork in both source and PyInstaller onedir builds."""
     import sys
 
-    name = Path("assets") / "PianoConvert.ico"
+    name = Path("assets") / filename
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
         frozen = Path(meipass) / name

@@ -65,6 +65,13 @@ def run_smoke() -> int:
 
         app = QApplication.instance() or QApplication([])
         win = MainWindow(engines={})
+        from app.paths import app_icon_path, asset_path
+        from PySide6.QtGui import QPixmap
+
+        if not app_icon_path().is_file() or win.windowIcon().isNull():
+            errors.append("assets: missing or invalid app icon")
+        if QPixmap(str(asset_path("venti-background.png"))).isNull():
+            errors.append("assets: missing or invalid Venti background")
         win.close()
         app.processEvents()
     except Exception as exc:  # noqa: BLE001

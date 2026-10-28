@@ -103,6 +103,7 @@ datas = [
 for _pkg in MUSIC21_DATAS_PACKAGES:
     datas.append((str(_package_dir(_pkg)), _pkg))
 datas.append((str(root / "assets" / "PianoConvert.ico"), "assets"))
+datas.append((str(root / "assets" / "venti-background.png"), "assets"))
 datas.append((str(root / "scripts" / "install_gpu.ps1"), "scripts"))
 datas.append((str(root / "app" / "gpu_worker.py"), "app"))
 datas.append((str(root / "piano_transcription_inference"), "piano_transcription_inference_src"))

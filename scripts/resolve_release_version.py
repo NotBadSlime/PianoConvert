@@ -14,6 +14,14 @@ class ReleaseVersion:
     tag: str
     plain: str
 
+    @property
+    def numeric(self) -> str:
+        return re.match(r"\d+(?:\.\d+){1,3}", self.plain).group(0)
+
+    @property
+    def prerelease(self) -> bool:
+        return self.numeric != self.plain
+
 
 def resolve_release_version(event_name: str, ref_name: str, input_version: str | None) -> ReleaseVersion:
     raw_version = input_version if event_name == "workflow_dispatch" else ref_name
@@ -31,6 +39,8 @@ def write_github_output(path: Path, version: ReleaseVersion) -> None:
     with path.open("a", encoding="utf-8") as handle:
         handle.write(f"tag={version.tag}\n")
         handle.write(f"plain={version.plain}\n")
+        handle.write(f"numeric={version.numeric}\n")
+        handle.write(f"prerelease={str(version.prerelease).lower()}\n")
 
 
 def main() -> int:
