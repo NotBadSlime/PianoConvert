@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
@@ -97,6 +98,41 @@ LAYOUT_DEFAULTS = {"arpeggio": ARPEGGIO_AUTO, "chord": CHORD_STANDARD}
 
 def _globs(suffixes) -> str:
     return " ".join(f"*{s}" for s in sorted(suffixes))
+
+
+class FitScrollArea(QScrollArea):
+    """As tall as its content when there is room; scrolls when the window is too short.
+    The size hint follows the content live (QScrollArea's own hint is cached)."""
+
+    def __init__(self, body: QWidget, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWidget(body)
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        self.viewport().setAutoFillBackground(False)
+        body.setAutoFillBackground(False)
+        self.setStyleSheet(
+            "QScrollArea#settingsScroll { background: transparent; border: none; }"
+            "QWidget#settingsScrollBody { background: transparent; }"
+        )
+        body.installEventFilter(self)
+
+    def eventFilter(self, watched, event):  # noqa: N802
+        if watched is self.widget() and event.type() == QEvent.Type.LayoutRequest:
+            self.updateGeometry()
+        return super().eventFilter(watched, event)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        body = self.widget()
+        if body is None:
+            return super().sizeHint()
+        hint = body.sizeHint()
+        return QSize(hint.width(), hint.height() + 2 * self.frameWidth())
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        return QSize(0, min(72, self.sizeHint().height()))
 
 
 def all_files_filter() -> str:
@@ -645,7 +681,14 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self._build_drop_zone(), 1)
         layout.addLayout(self._build_type_pickers())
-        layout.addWidget(self._build_settings())
+
+        # the settings (and the PDF note) scroll when the window is too short for them all
+        body = QWidget()
+        body.setObjectName("settingsScrollBody")
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(10)
+        body_layout.addWidget(self._build_settings())
 
         self.pdf_note = QLabel(
             "打谱软件导出的 PDF 五线谱会直接读取谱面上的音符，基本不会认错。"
@@ -663,9 +706,12 @@ class MainWindow(QMainWindow):
         self.pdf_icon.setFixedWidth(18)
         pdf_layout.addWidget(self.pdf_icon, 0, Qt.AlignmentFlag.AlignTop)
         pdf_layout.addWidget(self.pdf_note, 1)
-        layout.addWidget(self.pdf_box)
+        body_layout.addWidget(self.pdf_box)
         self.pdf_note.hide()
         self.pdf_box.hide()
+        self.settings_scroll = FitScrollArea(body)
+        self.settings_scroll.setObjectName("settingsScroll")
+        layout.addWidget(self.settings_scroll)
 
         # while no file is chosen the drop zone takes the free height; afterwards this spacer does
         self._convert_spacer = QWidget()
