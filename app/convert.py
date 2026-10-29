@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import re
 import shutil
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 from threading import Event
 from typing import Mapping
@@ -19,7 +21,7 @@ from app.keyboard_score import (
 )
 from app.paths import safe_stem
 from app.pdf_omr import IMAGE_SUFFIXES, PDF_SUFFIXES, VECTOR_SUFFIX, PdfOmrError, count_staves, recognize_pdf
-from app.score_io import midi_to_musicxml
+from app.score_io import midi_to_musicxml, musicxml_to_midi
 
 AUDIO_SUFFIXES = {".mp3", ".wav", ".flac", ".ogg", ".m4a"}
 
@@ -80,7 +82,7 @@ def _write_keyboard(
     range_strategy: str = RANGE_STRATEGY_DEFAULT,
     arpeggio: str = ARPEGGIO_AUTO,
     chord: str = CHORD_STANDARD,
-) -> None:
+) -> str:
     text = score_file_to_keyboard_text(
         midi_or_score,
         title,
@@ -91,7 +93,73 @@ def _write_keyboard(
         chord=chord,
     )
     fingertip = fingertip_section_from_score_file(midi_or_score, range_strategy)
-    dest.write_text(text.rstrip() + "\n\n" + fingertip, encoding="utf-8")
+    text = text.rstrip() + "\n\n" + fingertip
+    dest.write_text(text, encoding="utf-8")
+    return text
+
+
+_GRID_HEAD = re.compile(r"(\d+)/(\d+)\s+♩=\S+\s+每拍 (\d+) 格")
+_METER_CHANGE = re.compile(r"〔[^〕]*?(\d+)/(\d+)")
+
+
+def _grid_divisors(keyboard_text: str) -> tuple[int, ...] | None:
+    """The keyboard score's grid as music21 rounding (grid steps per quarter note), so the
+    MusicXML made from a MIDI file has the same rhythm as the keyboard score.
+
+    A cell is 1/k of a 1/denominator note; a meter change to another denominator adds that
+    grid too. None when the text has no keyboard-score header.
+    """
+    head = _GRID_HEAD.search(keyboard_text or "")
+    if not head:
+        return None
+    k = int(head.group(3))
+    main = keyboard_text.split("【指尖键盘谱】", 1)[0]  # the appended section has its own layout
+    denominators = {int(head.group(2))} | {int(m.group(2)) for m in _METER_CHANGE.finditer(main)}
+    # cells per quarter is k * d / 4; the smallest whole number of steps per quarter that
+    # holds every cell boundary is the numerator of that fraction
+    divisors = sorted({Fraction(k * d, 4).numerator for d in denominators if k > 0 and d > 0})
+    return tuple(divisors) or None
+
+
+def _fatal(exc: BaseException) -> bool:
+    if isinstance(exc, (CancelledError, ConvertError)):
+        return True
+    return isinstance(exc, OSError) and getattr(exc, "errno", None) in {13, 28}
+
+
+def _complete_outputs(
+    midi_path: Path,
+    xml_path: Path,
+    keyboard_text: str,
+    progress,
+    cancel: Event,
+    errors: list[str],
+) -> None:
+    """Every conversion leaves a MIDI and a MusicXML file beside the keyboard score: the
+    one the source did not give is made from the other (the MusicXML on the keyboard
+    score's rhythm grid)."""
+    if cancel.is_set():
+        raise CancelledError()
+    if not midi_path.exists() and xml_path.exists():
+        try:
+            progress("写入 MIDI", 0.88)
+            musicxml_to_midi(xml_path, midi_path)
+        except Exception as exc:  # noqa: BLE001
+            if _fatal(exc):
+                raise
+            errors.append("MIDI 导出失败")
+    if cancel.is_set():
+        raise CancelledError()
+    if not xml_path.exists() and midi_path.exists():
+        try:
+            progress("写入 MusicXML", 0.9)
+            midi_to_musicxml(midi_path, xml_path, _grid_divisors(keyboard_text))
+        except Exception as exc:  # noqa: BLE001
+            if _fatal(exc):
+                raise
+            errors.append(f"MusicXML 导出失败：{exc}"[:200])
+    if cancel.is_set():
+        raise CancelledError()
 
 
 def _with_note(text: str, note: str) -> str:
@@ -214,19 +282,11 @@ def run(
         if not midi_path.exists():
             raise RuntimeError("引擎没有写出 MIDI")
         errors: list[str] = []
+        text = ""
         try:
-            progress("写入 MusicXML", 0.85)
-            midi_to_musicxml(midi_path, xml_path)
-        except Exception as exc:  # noqa: BLE001
-            if isinstance(exc, (CancelledError, ConvertError)):
-                raise
-            if isinstance(exc, OSError) and getattr(exc, "errno", None) in {13, 28}:
-                raise
-            errors.append(f"谱面导出失败：{exc}"[:200])
-        try:
-            progress("写入键盘谱", 0.92)
+            progress("写入键盘谱", 0.8)
             # transcribed from audio: onsets are not on a grid
-            _write_keyboard(
+            text = _write_keyboard(
                 midi_path,
                 keyboard_path,
                 work,
@@ -243,6 +303,7 @@ def run(
                 errors.append("无法写入输出目录")
             else:
                 errors.append("键盘谱导出失败")
+        _complete_outputs(midi_path, xml_path, text, progress, cancel, errors)
         if errors:
             return _pack("partial", "；".join(errors))
         progress("完成", 1.0)
@@ -306,7 +367,11 @@ def run_score(
         if cancel.is_set():
             return _cancelled_result()
         progress("写入键盘谱", 0.6)
-        _write_keyboard(copied, keyboard_path, work, style=style, range_strategy=range_strategy, arpeggio=arpeggio, chord=chord)
+        text = _write_keyboard(copied, keyboard_path, work, style=style, range_strategy=range_strategy, arpeggio=arpeggio, chord=chord)
+        errors: list[str] = []
+        _complete_outputs(midi_path, xml_path, text, progress, cancel, errors)
+        if errors:
+            return _pack("partial", "；".join(errors))
         progress("完成", 1.0)
         return _pack("success", "")
     except CancelledError:
@@ -402,7 +467,12 @@ def run_pdf(
                 note += "# 注意：这份谱每行超过两行五线谱（多半是人声 + 钢琴），这类谱容易认错位，结果可能偏差较大。\n"
         text = _with_note(text, note)
         fingertip = fingertip_section_from_score_file(result_path, range_strategy)
-        keyboard_path.write_text(text.rstrip() + "\n\n" + fingertip, encoding="utf-8")
+        text = text.rstrip() + "\n\n" + fingertip
+        keyboard_path.write_text(text, encoding="utf-8")
+        errors: list[str] = []
+        _complete_outputs(midi_path, xml_path, text, progress, cancel, errors)
+        if errors:
+            return _pack("partial", "；".join(errors))
         progress("完成", 1.0)
         return _pack("success", "")
     except CancelledError:
