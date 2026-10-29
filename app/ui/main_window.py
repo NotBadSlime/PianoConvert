@@ -36,6 +36,12 @@ from app.engines.base import CancelledError
 from app.gpu_setup import explain_text, gpu_installed, install
 from app.history import HistoryItem, append_item, load_items, remove_item, restore_item
 from app.keyboard_score import (
+    ARPEGGIO_AUTO,
+    ARPEGGIO_CHORD,
+    ARPEGGIO_SPREAD,
+    CHORD_LOOSE,
+    CHORD_STANDARD,
+    CHORD_STRICT,
     RANGE_STRATEGY_DEFAULT,
     RANGE_STRATEGY_LABELS,
     RANGE_STRATEGY_MODERN,
@@ -47,6 +53,8 @@ from app.keyboard_score import (
 from app.paths import app_icon_path
 from app.pdf_omr import PDF_SUFFIXES
 from app.settings import (
+    ARPEGGIO,
+    CHORD,
     PREVIEW_SECTION,
     PREVIEW_ZOOM,
     RANGE_STRATEGY,
@@ -83,6 +91,8 @@ TAB_HISTORY = "history"
 _MIDI_SUFFIXES = {".mid", ".midi"}
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
 SUPPORTED_SUFFIXES = AUDIO_SUFFIXES | SCORE_SUFFIXES | PDF_SUFFIXES
+# how rolled chords are written and what counts as struck together, when left alone
+LAYOUT_DEFAULTS = {"arpeggio": ARPEGGIO_AUTO, "chord": CHORD_STANDARD}
 
 
 def _globs(suffixes) -> str:
@@ -444,11 +454,12 @@ class MainWindow(QMainWindow):
 
             style = getattr(self, "_job_style", None) or self.score_style()
             range_strategy = getattr(self, "_job_range_strategy", None) or self.range_strategy()
-            range_kwargs = (
-                {"range_strategy": range_strategy}
-                if range_strategy != RANGE_STRATEGY_DEFAULT
-                else {}
-            )
+            layout = getattr(self, "_job_layout", None) or self.layout_options()
+            # only settings that differ from the defaults are passed on
+            extra = {
+                **({"range_strategy": range_strategy} if range_strategy != RANGE_STRATEGY_DEFAULT else {}),
+                **{key: value for key, value in layout.items() if value != LAYOUT_DEFAULTS[key]},
+            }
             if kind == "score":
                 return run_score(
                     source,
@@ -456,7 +467,7 @@ class MainWindow(QMainWindow):
                     output_root=None,
                     on_progress=on_progress,
                     style=style,
-                    **range_kwargs,
+                    **extra,
                 )
             if kind == "pdf":
                 from app.convert import run_pdf
@@ -467,7 +478,7 @@ class MainWindow(QMainWindow):
                     output_root=None,
                     on_progress=on_progress,
                     style=style,
-                    **range_kwargs,
+                    **extra,
                 )
             return convert_run(
                 source,
@@ -477,7 +488,7 @@ class MainWindow(QMainWindow):
                 output_root=None,
                 on_progress=on_progress,
                 style=style,
-                **range_kwargs,
+                **extra,
             )
 
         return _fn
@@ -801,7 +812,155 @@ class MainWindow(QMainWindow):
         column.addWidget(self._build_options())
         column.addWidget(self._build_style_row())
         column.addWidget(self._build_range_row())
+        column.addWidget(self._build_advanced())
         return self.settings_box
+
+    # how rolled chords are written, and what counts as struck together
+    ARPEGGIO_HELP = {
+        ARPEGGIO_AUTO: "琶音写成 { }",
+        ARPEGGIO_CHORD: "琶音写成 ( ) 一起按",
+        ARPEGGIO_SPREAD: "弹出来的琶音分格写",
+    }
+    ARPEGGIO_TIPS = {
+        ARPEGGIO_AUTO: "谱上的琶音记号，和 MIDI 里弹出来的琶音，都写成 { }：从低到高依次快速按",
+        ARPEGGIO_CHORD: "所有琶音都写成 ( )：一起按，更好弹",
+        ARPEGGIO_SPREAD: "MIDI 里弹出来的琶音按实际先后分格写；谱上有记号的仍写 { }",
+    }
+    CHORD_HELP = {
+        CHORD_STRICT: "相差 30 毫秒内算一起按",
+        CHORD_STANDARD: "相差 50 毫秒内算一起按",
+        CHORD_LOOSE: "相差 80 毫秒内算一起按",
+    }
+
+    def _build_advanced(self) -> QWidget:
+        """琶音写法 and 和弦判定, behind a 高级选项 toggle; remembered between runs, and a
+        change lays out the score in 预览 again at once."""
+        box = QWidget()
+        column = QVBoxLayout(box)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(0)
+        self.advanced_button = QPushButton("高级选项")
+        self.advanced_button.setObjectName("link")
+        self.advanced_button.setIconSize(QSize(14, 14))
+        self.advanced_button.setCheckable(True)
+        self.advanced_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.advanced_button.setToolTip("琶音写法、和弦判定")
+        tab_focus(self.advanced_button)
+        toggle_row = QHBoxLayout()
+        toggle_row.setContentsMargins(10, 4, 12, 4)
+        toggle_row.addWidget(self.advanced_button)
+        toggle_row.addStretch(1)
+        column.addLayout(toggle_row)
+
+        self.advanced_box = QWidget()
+        inner = QVBoxLayout(self.advanced_box)
+        inner.setContentsMargins(0, 0, 0, 0)
+        inner.setSpacing(0)
+        settings = load_settings()
+
+        self.arpeggio_label = QLabel("琶音写法")
+        self.arpeggio_label.setObjectName("sectionLabel")
+        self.arpeggio_auto_radio = QRadioButton("自动")
+        self.arpeggio_chord_radio = QRadioButton("一起按")
+        self.arpeggio_spread_radio = QRadioButton("分开写")
+        self._arpeggio_radios = {
+            ARPEGGIO_AUTO: self.arpeggio_auto_radio,
+            ARPEGGIO_CHORD: self.arpeggio_chord_radio,
+            ARPEGGIO_SPREAD: self.arpeggio_spread_radio,
+        }
+        for mode, radio in self._arpeggio_radios.items():
+            radio.setToolTip(self.ARPEGGIO_TIPS[mode])
+        self._arpeggio_radios.get(settings.get(ARPEGGIO), self.arpeggio_auto_radio).setChecked(True)
+        self.arpeggio_segment = Segmented(list(self._arpeggio_radios.values()))
+        self.arpeggio_help = ElidedLabel("")
+        self.arpeggio_help.setObjectName("helper")
+        inner.addWidget(self._divider())
+        inner.addWidget(self._setting_row(self.arpeggio_label, self.arpeggio_help, self.arpeggio_segment))
+
+        self.chord_label = QLabel("和弦判定")
+        self.chord_label.setObjectName("sectionLabel")
+        self.chord_strict_radio = QRadioButton("严格")
+        self.chord_standard_radio = QRadioButton("标准")
+        self.chord_loose_radio = QRadioButton("宽松")
+        self._chord_radios = {
+            CHORD_STRICT: self.chord_strict_radio,
+            CHORD_STANDARD: self.chord_standard_radio,
+            CHORD_LOOSE: self.chord_loose_radio,
+        }
+        for mode, radio in self._chord_radios.items():
+            radio.setToolTip(self.CHORD_HELP[mode] + "（只影响录音和演奏录的 MIDI）")
+        self._chord_radios.get(settings.get(CHORD), self.chord_standard_radio).setChecked(True)
+        self.chord_segment = Segmented(list(self._chord_radios.values()))
+        self.chord_help = ElidedLabel("")
+        self.chord_help.setObjectName("helper")
+        inner.addWidget(self._divider())
+        inner.addWidget(self._setting_row(self.chord_label, self.chord_help, self.chord_segment))
+        column.addWidget(self.advanced_box)
+
+        for radio in list(self._arpeggio_radios.values()) + list(self._chord_radios.values()):
+            radio.toggled.connect(lambda checked: checked and self._on_layout_option_changed())
+        self.advanced_button.toggled.connect(self._set_advanced_open)
+        self._set_advanced_open(False)
+        self._sync_layout_help()
+        return box
+
+    def _set_advanced_open(self, on: bool) -> None:
+        self.advanced_box.setVisible(on)
+        self.advanced_button.setText("收起高级选项" if on else "高级选项：琶音写法、和弦判定")
+        self._refresh_advanced_icon()
+
+    def _refresh_advanced_icon(self) -> None:
+        theme = getattr(self, "theme", None)
+        tokens = getattr(theme, "tokens", None) or {}
+        color = tokens.get("accent", "#2f8a7a")
+        name = "chevron_down" if self.advanced_button.isChecked() else "chevron_right"
+        self.advanced_button.setIcon(icons.icon(name, color, 14))
+
+    def arpeggio_mode(self) -> str:
+        return next((mode for mode, radio in self._arpeggio_radios.items() if radio.isChecked()), ARPEGGIO_AUTO)
+
+    def chord_mode(self) -> str:
+        return next((mode for mode, radio in self._chord_radios.items() if radio.isChecked()), CHORD_STANDARD)
+
+    def layout_options(self) -> dict:
+        return {"arpeggio": self.arpeggio_mode(), "chord": self.chord_mode()}
+
+    def _sync_layout_help(self) -> None:
+        self.arpeggio_help.setText(self.ARPEGGIO_HELP[self.arpeggio_mode()])
+        self.chord_help.setText(self.CHORD_HELP[self.chord_mode()])
+
+    def _on_layout_option_changed(self) -> None:
+        save_setting(ARPEGGIO, self.arpeggio_mode())
+        save_setting(CHORD, self.chord_mode())
+        self._sync_layout_help()
+        self.rerender_preview()
+
+    def rerender_preview(self) -> bool:
+        """Lay out the score shown in 预览 again with the current settings (no new
+        conversion: the conversion's own MIDI / MusicXML is used)."""
+        item_id = self.preview.current_item_id() if hasattr(self, "preview") else ""
+        if not item_id or self._busy:
+            return False
+        row = next((r for r in self.history_rows() if r.item.id == item_id), None)
+        if row is None or row.item.status == "failed" or not _exists(row.item.keyboard_path):
+            return False
+        item = row.item
+        from app.convert import rerender_keyboard
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            rerender_keyboard(
+                item.kind, item.source_path, item.midi_path, item.musicxml_path, item.keyboard_path,
+                style=self.score_style(), range_strategy=self.range_strategy(), **self.layout_options(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.show_toast(f"没能重新排版：{exc}"[:80], "error")
+            return False
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.preview.show_item(item)
+        self.show_toast("已按新设置重新排版", "success")
+        return True
 
     def _build_options(self) -> QFrame:
         self.options_box = QFrame()
@@ -933,6 +1092,8 @@ class MainWindow(QMainWindow):
     def _on_range_strategy_changed(self, _index: int) -> None:
         save_setting(RANGE_STRATEGY, self.range_strategy())
         self._sync_range_help()
+        if hasattr(self, "_chord_radios"):
+            self.rerender_preview()
 
     def _sync_range_help(self) -> None:
         help_text = {
@@ -944,9 +1105,11 @@ class MainWindow(QMainWindow):
     def score_style(self) -> str:
         return STYLE_SIMPLE if self.simple_radio.isChecked() else STYLE_DETAILED
 
-    def _on_style_toggled(self, _checked: bool) -> None:
+    def _on_style_toggled(self, checked: bool) -> None:
         save_setting(SCORE_STYLE, self.score_style())
         self._sync_style_help()
+        if hasattr(self, "_chord_radios"):
+            self.rerender_preview()
 
     def _sync_style_help(self) -> None:
         if self.score_style() == STYLE_SIMPLE:
@@ -1162,6 +1325,9 @@ class MainWindow(QMainWindow):
         self.pick_button.setIcon(ico("audio", c["accent"], 14))
         self.pick_score_button.setIcon(ico("midi", c["accent"], 14))
         self.pick_pdf_button.setIcon(ico("pdf", c["accent"], 14))
+        if hasattr(self, "advanced_button"):
+            name = "chevron_down" if self.advanced_button.isChecked() else "chevron_right"
+            self.advanced_button.setIcon(ico(name, c["accent"], 14))
         self.gpu_download_button.setIcon(ico("download", c["text_2"], 14))
         self.gpu_script_button.setIcon(ico("script", c["text_2"], 14))
         self.banner_keyboard_button.setIcon(ico("keyboard", c["text_2"], 14))
@@ -1515,6 +1681,7 @@ class MainWindow(QMainWindow):
         self._enter_busy_ui("准备中")
         self._job_style = self.score_style()
         self._job_range_strategy = self.range_strategy()
+        self._job_layout = self.layout_options()
         for engine in self._engines.values():
             engine.device = "cuda" if self.gpu_radio.isChecked() else "cpu"
 

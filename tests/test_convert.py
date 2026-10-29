@@ -172,3 +172,31 @@ def test_run_score_rejects_audio(tmp_path):
     src.write_bytes(b"x")
     with pytest.raises(ConvertError, match="乐谱"):
         run_score(src, Event(), output_root=tmp_path)
+
+
+def test_rerender_keeps_title_and_notes_and_applies_settings(tmp_path):
+    from app.convert import rerender_keyboard, run_pdf
+
+    src = tmp_path / "rolled.pdf"
+    src.write_bytes(b"%PDF-1.4 fake")
+
+    def recognize(pdf, work_dir, stop):
+        out = work_dir / "rolled_vector.mid"
+        pm = pretty_midi.PrettyMIDI(initial_tempo=120)
+        pm.text_events.append(pretty_midi.Text("PianoConvert:arpeggio:48,52,55", 0.0))
+        inst = pretty_midi.Instrument(program=0, name="Staff 1")
+        for p in (48, 52, 55):
+            inst.notes.append(pretty_midi.Note(80, p, 0.0, 1.9))
+        pm.instruments.append(inst)
+        pm.write(str(out))
+        return out
+
+    result = run_pdf(src, Event(), output_root=tmp_path / "out", recognize=recognize, style="simple")
+    assert result.status == "success", result.error
+    assert "{ZCB}" in result.keyboard_path.read_text(encoding="utf-8")
+    text = rerender_keyboard("pdf", src, result.midi_path, result.musicxml_path, result.keyboard_path,
+                             style="simple", arpeggio="chord")
+    assert "{ZCB}" not in text and "(ZCB)" in text
+    assert text.splitlines()[0] == "# rolled"
+    assert "直接读取" in text                      # the note about where the score came from
+    assert result.keyboard_path.read_text(encoding="utf-8") == text

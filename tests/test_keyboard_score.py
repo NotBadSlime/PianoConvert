@@ -442,3 +442,24 @@ def test_low_track_named_voice_is_not_the_tune(tmp_path):
     pm.write(str(midi))
     rows = _section(midi_to_keyboard_text(midi, title="named"), "键盘谱").splitlines()
     assert rows[0] == "1 旋律 | E E E E |"
+
+def test_arpeggio_setting_changes_how_rolls_are_written():
+    times = [1 - 3 / 12, 1 - 2 / 12, 1 - 1 / 12, 1.0]
+    chord = [note(p, t, 3) for p, t in zip((48, 52, 55, 60), times)]
+    notes = [note(64, 0, 1)] + chord
+    auto = keyboard_text(notes, "a", style=STYLE_SIMPLE)
+    together = keyboard_text(notes, "a", style=STYLE_SIMPLE, arpeggio="chord")
+    spread = keyboard_text(notes, "a", style=STYLE_SIMPLE, arpeggio="spread")
+    assert _section(auto, "键盘谱") == "1 | D {ZCBA} - 0 |"
+    assert _section(together, "键盘谱") == "1 | D (ZCBA) - 0 |"
+    assert "{" not in _section(spread, "键盘谱") and "每拍 1 格" not in spread   # each note in its own cell
+
+
+def test_chord_setting_changes_what_counts_as_together():
+    # sixteenths, then a performed chord whose two notes are struck 70 ms apart, across a cell line
+    notes = [note(60, i * 0.25, i * 0.25 + 0.2) for i in range(16)]
+    notes += [note(64, 4.10, 5.0), note(67, 4.24, 5.0)]
+    standard = keyboard_text(notes, "c", strict=False, style=STYLE_SIMPLE)
+    loose = keyboard_text(notes, "c", strict=False, style=STYLE_SIMPLE, chord="loose")
+    assert "(DG)" in loose
+    assert "(DG)" not in standard and "DG" in standard

@@ -106,6 +106,23 @@ STYLE_DETAILED = "detailed"  # tune and accompaniment on two rows
 STYLE_SIMPLE = "simple"      # everything on one row
 STYLES = (STYLE_DETAILED, STYLE_SIMPLE)
 
+# how rolled chords (arpeggios) are written
+ARPEGGIO_AUTO = "auto"      # { }: arpeggio signs in a score, and rolls played out in a MIDI file
+ARPEGGIO_CHORD = "chord"    # ( ): every rolled chord is written as keys pressed together
+ARPEGGIO_SPREAD = "spread"  # rolls played out in a MIDI file keep each note's own time
+ARPEGGIO_MODES = (ARPEGGIO_AUTO, ARPEGGIO_CHORD, ARPEGGIO_SPREAD)
+
+# notes struck this close together (seconds) are one chord; matters for recordings and
+# performed MIDI files, whose chords are never exactly together
+CHORD_STRICT = "strict"
+CHORD_STANDARD = "standard"
+CHORD_LOOSE = "loose"
+CHORD_WINDOWS = {CHORD_STRICT: 0.030, CHORD_STANDARD: CLUSTER_SEC, CHORD_LOOSE: 0.080}
+
+
+def chord_window(name: str | None) -> float:
+    return CHORD_WINDOWS.get(name or CHORD_STANDARD, CLUSTER_SEC)
+
 # MIDI text events written by app.pdf_vector carry what the notes alone cannot say:
 #   PianoConvert:grace:<pitch>             a grace note starting at the event time
 #   PianoConvert:arpeggio:<p1>,<p2>,...    a rolled chord starting at the event time
@@ -781,7 +798,7 @@ def _grid_level(q: float) -> int:
     return 3
 
 
-def _find_rolls(placed: list[_Placed]) -> None:
+def _find_rolls(placed: list[_Placed], played: bool = True) -> None:
     """Rolled chords (arpeggios).
 
     Marked ones come from the score (simultaneous notes flagged ``arpeggio``). MIDI files
@@ -789,6 +806,7 @@ def _find_rolls(placed: list[_Placed]) -> None:
     a moment apart (evenly), all still sounding when the last one starts. Other notes
     struck at the same moments (the other hand) do not belong to the roll. A rolled
     chord belongs to the beat it is written on, which is the member closest to the grid.
+    played=False leaves played-out rolls alone (each note keeps its own time).
     """
     next_id = 1
     flagged = sorted((p for p in placed if p.note.arpeggio and not p.note.grace), key=lambda p: p.q)
@@ -802,6 +820,8 @@ def _find_rolls(placed: list[_Placed]) -> None:
                 p.roll = next_id
             next_id += 1
         i = j + 1
+    if not played:
+        return
     pool = sorted((p for p in placed if not p.note.grace and not p.roll), key=lambda p: (p.q, p.note.orig))
     steps: list[list[_Placed]] = []
     for p in pool:
@@ -967,6 +987,8 @@ def layout_grid(
     meters: list[MeterMark],
     strict: bool = True,
     style: str = STYLE_DETAILED,
+    arpeggio: str = ARPEGGIO_AUTO,
+    chord_window: float = CLUSTER_SEC,
 ) -> GridLayout:
     placed = [
         _Placed(n, seconds_to_quarters(n.start, tempos), seconds_to_quarters(max(n.end, n.start), tempos))
@@ -977,15 +999,15 @@ def layout_grid(
         for p in placed:
             p.q = max(0.0, p.q - shift)
             p.qe = max(p.q, p.qe - shift)
-    _find_rolls(placed)
+    _find_rolls(placed, played=arpeggio != ARPEGGIO_SPREAD)
     _attach_graces(placed)
     mains = [p for p in placed if p.main is None]
     graces = [p for p in placed if p.main is not None]
-    # notes struck within CLUSTER_SEC of each other are one chord (several tracks, or a
-    # performance, are never exactly together)
+    # notes struck within chord_window seconds of each other are one chord (several
+    # tracks, or a performance, are never exactly together)
     chord_first: _Placed | None = None
     for p in sorted((p for p in mains if not p.roll), key=lambda p: p.note.start):
-        if chord_first is not None and p.note.start - chord_first.note.start <= CLUSTER_SEC:
+        if chord_first is not None and p.note.start - chord_first.note.start <= chord_window:
             p.q = chord_first.q
         else:
             chord_first = p
@@ -1050,6 +1072,11 @@ def layout_grid(
             a.roll = False
     else:
         rows_flat = [("", _row_cells(mains, graces, n_cells, end_cell))]
+    if arpeggio == ARPEGGIO_CHORD:
+        # rolled chords are written as chords pressed together
+        for _label, cells in rows_flat:
+            for cell in cells:
+                cell.roll = False
     rows = [(label, [cells[offsets[i] : offsets[i + 1]] for i in range(len(bars))]) for label, cells in rows_flat]
 
     marks: list[str] = []
@@ -1312,14 +1339,20 @@ def keyboard_text(
     strict: bool = True,
     style: str = STYLE_DETAILED,
     range_strategy: str = RANGE_STRATEGY_DEFAULT,
+    arpeggio: str = ARPEGGIO_AUTO,
+    chord: str = CHORD_STANDARD,
 ) -> str:
-    """The keyboard score of some notes (times in seconds)."""
+    """The keyboard score of some notes (times in seconds). range_strategy: how notes are
+    moved into the lyre's range; arpeggio: one of ARPEGGIO_MODES; chord: how close
+    (CHORD_WINDOWS) notes must be struck to count as one chord."""
     if tempos is None or meters is None:
         tempos, meters = _constant_timeline(beat_sec, beats_per_bar)
     lyre, info = arrange_events(notes, range_strategy)
     if not lyre:
         raise KeyboardScoreError("没有可转换的音符")
-    layout = layout_grid(lyre, tempos, meters, strict, style)
+    if arpeggio not in ARPEGGIO_MODES:
+        arpeggio = ARPEGGIO_AUTO
+    layout = layout_grid(lyre, tempos, meters, strict, style, arpeggio, chord_window(chord))
     return (
         _header(title, layout, info)
         + f"\n【简谱】\n{render_grid(layout, 'num')}\n\n"
@@ -1717,6 +1750,8 @@ def notes_to_text(
     strict: bool = True,
     style: str = STYLE_DETAILED,
     range_strategy: str = RANGE_STRATEGY_DEFAULT,
+    arpeggio: str = ARPEGGIO_AUTO,
+    chord: str = CHORD_STANDARD,
 ) -> str:
     if not notes:
         raise KeyboardScoreError("没有可转换的音符")
@@ -1728,6 +1763,8 @@ def notes_to_text(
         strict=strict,
         style=style,
         range_strategy=range_strategy,
+        arpeggio=arpeggio,
+        chord=chord,
     )
 
 
@@ -1737,9 +1774,11 @@ def midi_to_keyboard_text(
     strict: bool = True,
     style: str = STYLE_DETAILED,
     range_strategy: str = RANGE_STRATEGY_DEFAULT,
+    arpeggio: str = ARPEGGIO_AUTO,
+    chord: str = CHORD_STANDARD,
 ) -> str:
     notes, tempos, meters = notes_from_midi(path)
-    return notes_to_text(notes, tempos, meters, title, strict, style, range_strategy)
+    return notes_to_text(notes, tempos, meters, title, strict, style, range_strategy, arpeggio, chord)
 
 
 def musicxml_to_keyboard_text(
@@ -1748,9 +1787,11 @@ def musicxml_to_keyboard_text(
     strict: bool = True,
     style: str = STYLE_DETAILED,
     range_strategy: str = RANGE_STRATEGY_DEFAULT,
+    arpeggio: str = ARPEGGIO_AUTO,
+    chord: str = CHORD_STANDARD,
 ) -> str:
     notes, tempos, meters = notes_from_musicxml(path)
-    return notes_to_text(notes, tempos, meters, title, strict, style, range_strategy)
+    return notes_to_text(notes, tempos, meters, title, strict, style, range_strategy, arpeggio, chord)
 
 
 def score_file_to_keyboard_text(
@@ -1759,12 +1800,17 @@ def score_file_to_keyboard_text(
     strict: bool = True,
     style: str = STYLE_DETAILED,
     range_strategy: str = RANGE_STRATEGY_DEFAULT,
+    arpeggio: str = ARPEGGIO_AUTO,
+    chord: str = CHORD_STANDARD,
 ) -> str:
     """Keyboard score of a MIDI / MusicXML file.
 
     strict=False is for MIDI transcribed from audio: its onsets are not on a grid, so only
     distinct onsets are kept apart when choosing the cells per beat. style: STYLE_DETAILED
-    (tune and accompaniment on two rows) or STYLE_SIMPLE (one row).
+    (tune and accompaniment on two rows) or STYLE_SIMPLE (one row). range_strategy: how
+    notes are moved into the lyre's range. arpeggio: how rolled chords are written
+    (ARPEGGIO_MODES); chord: how close notes must be struck to count as one chord
+    (CHORD_WINDOWS).
     """
     path = Path(path)
     stem = title or path.stem
@@ -1772,9 +1818,9 @@ def score_file_to_keyboard_text(
     if style not in STYLES:
         style = STYLE_DETAILED
     if suffix in MIDI_SUFFIXES:
-        return midi_to_keyboard_text(path, stem, strict, style, range_strategy)
+        return midi_to_keyboard_text(path, stem, strict, style, range_strategy, arpeggio, chord)
     if suffix in MUSICXML_SUFFIXES:
-        return musicxml_to_keyboard_text(path, stem, strict, style, range_strategy)
+        return musicxml_to_keyboard_text(path, stem, strict, style, range_strategy, arpeggio, chord)
     raise KeyboardScoreError("无法读取这个乐谱文件")
 
 

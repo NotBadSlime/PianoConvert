@@ -222,3 +222,20 @@ def test_tempo_changes_are_written_to_the_midi(tmp_path):
     assert [round(t, 3) for t in times] == [0.0, 2.0] and [round(b) for b in bpms] == [120, 60]
     starts = sorted(n.start for n in pm.instruments[0].notes)
     assert [round(s, 3) for s in starts] == [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0]
+
+def test_tie_to_a_note_that_ended_long_before_is_played():
+    staff = pv.Staff(40, 300, [700, 695, 690, 685, 680], 0)
+
+    def ev(t: float, length: float, tied: bool = False, rest: bool = False) -> pv.Event:
+        x = 100 + 25 * t
+        heads = [] if rest else [pv.Head(x, 690, 1.0, False, staff, 0, 76, tied=tied)]
+        return pv.Event(x, staff, length, heads)
+
+    held_on = pv.Bar([ev(0, 1.0), ev(1, 1.0, tied=True), ev(2, 2.0)], length=4.0)        # a real tie
+    rests = [pv.Bar([ev(0, 4.0, rest=True)], length=4.0) for _ in range(2)]
+    far = pv.Bar([ev(0, 2.0, rest=True), ev(2, 1.0, rest=True), ev(3, 1.0, tied=True)], length=4.0)
+    bars = [held_on] + rests + [far]
+    for k, bar in enumerate(bars):
+        bar.x0 = k
+    score = pv.build_score(bars, 120.0)
+    assert [(n.start_q, n.end_q) for n in score.notes] == [(0.0, 2.0), (2.0, 4.0), (15.0, 16.0)]

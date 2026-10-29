@@ -4,6 +4,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from pathlib import Path
 
+import pretty_midi
 import pytest
 from PySide6.QtWidgets import QApplication
 
@@ -321,7 +322,7 @@ def test_score_style_switch_is_remembered(_isolated_settings):
 def test_score_style_reaches_the_conversion(tmp_path, monkeypatch):
     seen = {}
 
-    def fake_run_score(source, cancel, output_root=None, on_progress=None, style="detailed"):
+    def fake_run_score(source, cancel, output_root=None, on_progress=None, style="detailed", **layout):
         seen["style"] = style
         return None
 
@@ -720,3 +721,61 @@ def test_score_rows_stay_aligned_with_real_fonts():
     assert len(top) == len(bottom) == 3
     assert top == pytest.approx(bottom, abs=0.75)
     view.close()
+
+def test_arpeggio_and_chord_settings_are_remembered(_isolated_settings):
+    app = QApplication.instance() or QApplication([])
+    win = MainWindow(engines={})
+    assert win.advanced_box.isHidden() is True
+    win.advanced_button.setChecked(True)
+    assert win.advanced_box.isHidden() is False
+    assert (win.arpeggio_mode(), win.chord_mode()) == ("auto", "standard")
+    win.arpeggio_chord_radio.setChecked(True)
+    win.chord_loose_radio.setChecked(True)
+    assert "( )" in win.arpeggio_help.text() and "80" in win.chord_help.text()
+    again = MainWindow(engines={})
+    assert (again.arpeggio_mode(), again.chord_mode()) == ("chord", "loose")
+
+
+def test_layout_options_reach_the_conversion(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_run_score(source, cancel, output_root=None, on_progress=None, style="detailed", arpeggio="auto", chord="standard"):
+        seen.update(style=style, arpeggio=arpeggio, chord=chord)
+        return None
+
+    monkeypatch.setattr("app.convert.run_score", fake_run_score)
+    app = QApplication.instance() or QApplication([])
+    win = MainWindow(engines={})
+    win.arpeggio_spread_radio.setChecked(True)
+    win.chord_strict_radio.setChecked(True)
+    from threading import Event
+
+    win._make_default_convert()(tmp_path / "song.mid", "score", Event(), None)
+    assert seen == {"style": "detailed", "arpeggio": "spread", "chord": "strict"}
+
+
+def test_changing_the_arpeggio_setting_lays_out_the_preview_again(tmp_path, isolated_history):
+    from threading import Event
+
+    from app.convert import run_score
+
+    midi = tmp_path / "roll.mid"
+    pm = pretty_midi.PrettyMIDI(initial_tempo=120)
+    inst = pretty_midi.Instrument(program=0)
+    inst.notes.append(pretty_midi.Note(80, 64, 0.0, 0.45))
+    for p, t in zip((48, 52, 55, 60), (0.375, 0.4167, 0.4583, 0.5)):   # a roll played out
+        inst.notes.append(pretty_midi.Note(80, p, t, 1.5))
+    pm.instruments.append(inst)
+    pm.write(str(midi))
+    result = run_score(midi, Event(), output_root=tmp_path / "out", style="simple")
+    app = QApplication.instance() or QApplication([])
+    win = MainWindow(engines={})
+    win.simple_radio.setChecked(True)
+    item = win._save_history(result)
+    win.reload_history()
+    win.select_history_id(item.id)
+    assert "{ZCBA}" in result.keyboard_path.read_text(encoding="utf-8")
+    win.arpeggio_chord_radio.setChecked(True)
+    text = result.keyboard_path.read_text(encoding="utf-8")
+    assert "(ZCBA)" in text and "{" not in text.split("【键盘谱】")[1]
+    assert "(ZCBA)" in win.preview.text()

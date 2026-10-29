@@ -10,12 +10,16 @@ RANGE_STRATEGY = "range_strategy"
 THEME = "theme"                    # "system" (跟随系统) / "light" / "dark"
 PREVIEW_ZOOM = "preview_zoom"      # percent, 70 … 200
 PREVIEW_SECTION = "preview_section"  # "keyboard" / "jianpu" / "fingertip" / "all"
+ARPEGGIO = "arpeggio"             # "auto" / "chord" / "spread": how rolled chords are written
+CHORD = "chord"                   # "strict" / "standard" / "loose": what counts as struck together
 DEFAULTS = {
     SCORE_STYLE: "detailed",
     RANGE_STRATEGY: "modern",
     THEME: "system",
     PREVIEW_ZOOM: 100,
     PREVIEW_SECTION: "keyboard",
+    ARPEGGIO: "auto",
+    CHORD: "standard",
 }
 
 

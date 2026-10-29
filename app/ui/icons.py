@@ -53,6 +53,9 @@ GLYPHS: dict[str, tuple[int, str]] = {
     "undo": (0xE7A7, "↶"),
     "clock": (0xE823, "◷"),
     "more": (0xE712, "…"),
+    "chevron_down": (0xE70D, "v"),
+    "chevron_right": (0xE76C, ">"),
+    "options": (0xE713, "*"),
 }
 
 _family_cache: list[str | None] = []

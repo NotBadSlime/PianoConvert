@@ -23,19 +23,34 @@ def write_notes_midi(
 
 
 def midi_to_musicxml(midi_path: Path, dest: Path) -> None:
+    """MusicXML of a MIDI file.
+
+    music21 cannot write some rhythms it reads (for example a note cut by a quick roll);
+    then the file is read again on a coarser grid, so a MusicXML is always written.
+    """
     from music21 import converter
 
-    score = converter.parse(str(midi_path))
+    attempts: list[tuple[int, ...] | None] = [None, (4,), (2,)]
     dest.parent.mkdir(parents=True, exist_ok=True)
-    written = score.write("musicxml", fp=str(dest))
-    # music21 may write a different suffix; ensure dest exists with requested name
-    from pathlib import Path as P
-
-    out = P(str(written)) if written is not None else dest
-    if out != dest and out.exists():
-        dest.write_bytes(out.read_bytes())
-        if out != dest:
+    error: Exception | None = None
+    for divisors in attempts:
+        try:
+            if divisors:
+                score = converter.parse(str(midi_path), forceSource=True, quarterLengthDivisors=divisors)
+            else:
+                score = converter.parse(str(midi_path), forceSource=True)
+            written = score.write("musicxml", fp=str(dest))
+        except OSError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - try the next, coarser grid
+            error = exc
+            continue
+        out = Path(str(written)) if written is not None else dest
+        if out != dest and out.exists():
+            dest.write_bytes(out.read_bytes())
             try:
                 out.unlink()
             except OSError:
                 pass
+        return
+    raise error if error is not None else ValueError("MusicXML 导出失败")

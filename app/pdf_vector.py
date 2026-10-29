@@ -62,6 +62,7 @@ MUSIC_FONT = "MusicFont"
 DEFAULT_BPM = 90.0  # used when the score prints no tempo
 MIN_TREMOLO = 0.125  # quarters: tremolos faster than 32nd notes are played as 32nd notes
 GRACE_STEP = 0.125   # quarters: a grace note is played as a 32nd just before its note
+TIE_GAP = 4.0        # quarters: a tie never reaches back further than about a bar
 
 STEP_SEMITONES = [0, 2, 4, 5, 7, 9, 11]
 _DEBUG = bool(__import__("os").environ.get("PDF_VECTOR_DEBUG"))
@@ -1728,9 +1729,14 @@ def build_score(all_bars: list[Bar], bpm: float) -> VectorScore:
                 continue
             for h in ev.heads:
                 key = (ev.staff.index, h.pitch)
-                if h.tied and key in held:
-                    held[key].end_q = max(held[key].end_q, q + ev.t + ev.length)
+                onset = q + ev.t
+                # a tie only holds on the note sounding right up to this one; a "tie" to a
+                # note that ended long before is a curve read as a tie: the note is played
+                if h.tied and key in held and held[key].end_q >= onset - TIE_GAP:
+                    held[key].end_q = max(held[key].end_q, onset + ev.length)
                     continue
+                if h.tied and key in held:
+                    h.tied = False
                 if h.tied:
                     continue
                 n = ScoreNote(
