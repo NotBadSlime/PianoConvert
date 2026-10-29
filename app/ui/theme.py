@@ -331,12 +331,12 @@ QPushButton#iconButton:focus {{ padding: 3px; }}
 QPushButton#small {{ padding: 4px 10px; font-size: {TYPE['caption'][0]}px; border-radius: {r['sm'] + 1}px; min-height: 18px; }}
 QPushButton#small:focus {{ padding: 3px 9px; }}
 QPushButton#rowAction {{
-  padding: 2px 8px; font-size: {TYPE['caption'][0]}px; border-radius: {r['sm']}px; min-height: 18px;
+  padding: 2px 6px; font-size: {TYPE['caption'][0]}px; border-radius: {r['sm']}px; min-height: 18px;
   background: {c['surface']}; color: {c['text_2']}; border: 1px solid {c['border']};
 }}
 QPushButton#rowAction:hover {{ background: {c['accent_soft']}; color: {c['accent']}; border-color: {c['accent_line']}; }}
 QPushButton#rowAction:pressed {{ background: {c['accent_soft_hover']}; }}
-QPushButton#rowAction:focus {{ border: 2px solid {c['focus']}; padding: 1px 7px; }}
+QPushButton#rowAction:focus {{ border: 2px solid {c['focus']}; padding: 1px 5px; }}
 QPushButton#rowAction:disabled {{ color: {c['disabled']}; background: transparent; border-color: {c['divider']}; }}
 QPushButton#closeBanner {{
   background: transparent; border: none; color: {c['muted']}; font-size: 12px;

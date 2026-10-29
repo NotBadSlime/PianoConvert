@@ -17,7 +17,33 @@ REQUIRED_IMPORTS = (
     ("torch", "torch"),
     ("homr", "homr"),
     ("musicxml", "musicxml"),
+    ("transkun", "transkun"),
+    ("mir_eval", "mir_eval"),
 )
+
+
+def _check_transkun() -> str:
+    """Empty when TransKun can load its model and transcribe a second of audio, else the problem."""
+    import tempfile
+    from pathlib import Path
+
+    from app import transkun_infer
+
+    reason = transkun_infer.unavailable_reason()
+    if reason:
+        return reason
+    import numpy as np
+    import soundfile as sf
+
+    model = transkun_infer.load_model("cpu")  # the weights are there and the model builds
+    with tempfile.TemporaryDirectory() as work:
+        wav, midi = Path(work) / "t.wav", Path(work) / "t.mid"
+        noise = np.random.default_rng(0).standard_normal(44100) * 0.01
+        sf.write(str(wav), noise.astype("float32"), 44100)
+        transkun_infer.transcribe_file(model, wav, midi, "cpu")  # audio in, segments decoded, MIDI out
+        if not midi.is_file():
+            return "no MIDI was written"
+    return ""
 
 
 def check_imports() -> list[str]:
@@ -27,6 +53,12 @@ def check_imports() -> list[str]:
             __import__(modname)
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{label}: {exc}")
+    try:
+        problem = _check_transkun()
+        if problem:
+            errors.append(f"transkun: {problem}")
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"transkun: {exc}")
     try:
         from music21 import converter  # noqa: F401
     except Exception as exc:  # noqa: BLE001

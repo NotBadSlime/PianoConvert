@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -32,8 +33,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.convert import AUDIO_SUFFIXES
+from app.convert import AUDIO_SUFFIXES, make_musicxml, musicxml_error_text
 from app.engines.base import CancelledError
+from app.engines.piano import DEFAULT_PIANO_MODEL, MODEL_KONG, MODEL_TRANSKUN
 from app.gpu_setup import explain_text, gpu_installed, install
 from app.history import HistoryItem, append_item, load_items, remove_item, restore_item
 from app.keyboard_score import (
@@ -56,6 +58,7 @@ from app.pdf_omr import PDF_SUFFIXES
 from app.settings import (
     ARPEGGIO,
     CHORD,
+    PIANO_MODEL,
     PREVIEW_SECTION,
     PREVIEW_ZOOM,
     RANGE_STRATEGY,
@@ -190,9 +193,9 @@ def _format_elapsed(seconds: float) -> str:
 
 def default_engines():
     from app.engines.basic_pitch import BasicPitchEngine
-    from app.engines.kong_piano import KongPianoEngine
+    from app.engines.piano import PianoEngine
 
-    return {"piano": KongPianoEngine(), "other": BasicPitchEngine()}
+    return {"piano": PianoEngine(), "other": BasicPitchEngine()}
 
 
 def _first_dropped_path(event: QDragEnterEvent | QDropEvent) -> Path | None:
@@ -230,6 +233,13 @@ def _startfile(path: str) -> None:
     os.startfile(path)  # type: ignore[attr-defined]
 
 
+def _reveal(path: str) -> None:
+    """Show a file selected in Explorer."""
+    import subprocess
+
+    subprocess.Popen(["explorer", "/select,", str(Path(path))])
+
+
 def _notify_error(parent: QWidget | None, text: str) -> None:
     """A non-fatal problem: a toast when the main window is around, otherwise a message box."""
     window = parent.window() if parent is not None else None
@@ -249,6 +259,85 @@ def open_path(parent: QWidget | None, path: str | os.PathLike | None) -> bool:
         _notify_error(parent, "文件不在了，或者打不开")
         return False
     return True
+
+
+# The MusicXML button of a conversion. MIDI is there for every conversion; the MusicXML is
+# made from it when asked for (it is the slow part), so the button either opens the file,
+# offers to make it, or shows that it is being made.
+XML_OPEN, XML_MAKE, XML_BUSY, XML_NONE = "open", "make", "busy", "none"
+XML_TEXTS = {XML_OPEN: "MusicXML", XML_MAKE: "转 MusicXML", XML_BUSY: "转换中…", XML_NONE: "MusicXML"}
+XML_TIPS = {
+    XML_OPEN: "打开 MusicXML",
+    XML_MAKE: "把这次的 MIDI 转成 MusicXML，转好后自动打开（几秒钟，长一点的曲子要十几秒）",
+    XML_BUSY: "正在把 MIDI 转成 MusicXML，请稍等",
+    XML_NONE: "这次转换没有 MusicXML，MIDI 文件也不在了，没法转",
+}
+
+
+def musicxml_state(midi_path, xml_path, running: bool = False) -> str:
+    if running:
+        return XML_BUSY
+    if _exists(xml_path):
+        return XML_OPEN
+    named = bool(xml_path) and str(xml_path) not in {"", "."}  # an old record may name no MusicXML file
+    return XML_MAKE if named and _exists(midi_path) else XML_NONE
+
+
+def set_musicxml_button(button: QPushButton, state: str) -> None:
+    button.setText(XML_TEXTS[state])
+    button.setToolTip(XML_TIPS[state])
+    button.setEnabled(state in (XML_OPEN, XML_MAKE))
+    button.setProperty("xmlState", state)
+
+
+class MusicXmlMaker(QObject):
+    """Turns the MIDI of a conversion into MusicXML on a background thread: for a long piece
+    that takes ten seconds and more, and the window stays usable meanwhile.
+
+    ``done(xml_path, error)`` arrives on the window's thread; ``error`` is empty when the
+    file was written. One file is made at a time per MusicXML path.
+    """
+
+    done = Signal(str, str)
+
+    def __init__(self, make=None, parent: QObject | None = None):
+        super().__init__(parent)
+        self._make = make
+        self._running: set[str] = set()
+
+    @staticmethod
+    def _key(path) -> str:
+        return os.path.normcase(os.path.abspath(str(path)))
+
+    def is_running(self, xml_path) -> bool:
+        return bool(xml_path) and self._key(xml_path) in self._running
+
+    def start(self, midi_path, xml_path, keyboard_path="") -> bool:
+        """Begin making ``xml_path``; False when that file is already being made."""
+        key = self._key(xml_path)
+        if key in self._running:
+            return False
+        self._running.add(key)
+        thread = threading.Thread(
+            target=self._work,
+            args=(key, str(midi_path), str(xml_path), str(keyboard_path or "")),
+            name="musicxml",
+            daemon=True,  # never keeps the program from closing
+        )
+        thread.start()
+        return True
+
+    def _work(self, key: str, midi_path: str, xml_path: str, keyboard_path: str) -> None:
+        error = ""
+        try:
+            (self._make or make_musicxml)(midi_path, xml_path, keyboard_path or None)
+        except Exception as exc:  # noqa: BLE001
+            error = musicxml_error_text(exc)
+        self._running.discard(key)
+        try:
+            self.done.emit(xml_path, error)
+        except RuntimeError:
+            pass  # the window is already gone
 
 
 class GpuDownloadWorker(QObject):
@@ -301,11 +390,14 @@ def _partial_note(error: str) -> str:
         return "键盘谱导出失败"
     if keyboard and score:
         return "谱面或键盘谱导出失败"
+    if "MIDI 导出失败" in error:
+        return "MIDI 导出失败"
     return "谱面导出失败"
 
 
 class HistoryRow(QWidget):
     menu_requested = Signal(object, QPoint)    # right click: context menu at a global position
+    xml_requested = Signal(object)             # MusicXML button: open the file, or make it from the MIDI first
 
     def __init__(self, item: HistoryItem, parent: QWidget | None = None):
         super().__init__(parent)
@@ -368,7 +460,6 @@ class HistoryRow(QWidget):
         self.midi_button = QPushButton("MIDI")
         self.midi_button.setToolTip("打开 MIDI")
         self.xml_button = QPushButton("MusicXML")
-        self.xml_button.setToolTip("打开 MusicXML")
         self.keyboard_button = QPushButton("打开键盘谱")
         self.keyboard_button.setToolTip("用记事本等程序打开（双击这一条也可以）")
         self.folder_button = QPushButton("打开文件夹")
@@ -377,21 +468,23 @@ class HistoryRow(QWidget):
             (self.keyboard_button, item.keyboard_path),
             (self.folder_button, item.folder),
             (self.midi_button, item.midi_path),
-            (self.xml_button, item.musicxml_path),
         )
         buttons = QHBoxLayout()
         buttons.setContentsMargins(0, 0, 0, 0)
         buttons.setSpacing(4)
-        for button, target in targets:
+        for button in (self.keyboard_button, self.folder_button, self.midi_button, self.xml_button):
             button.setObjectName("rowAction")
             button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             tab_focus(button)
-            button.setEnabled(_exists(target))
-            button.clicked.connect(lambda _=False, t=target: self._open(t))
             if item.status == "failed":
                 button.hide()
             buttons.addWidget(button)
+        for button, target in targets:
+            button.setEnabled(_exists(target))
+            button.clicked.connect(lambda _=False, t=target: self._open(t))
+        self.xml_button.clicked.connect(lambda _=False: self.xml_requested.emit(self))
+        self.set_xml_state(self.xml_state())
         buttons.addStretch(1)
         if item.status != "failed":
             column.addLayout(buttons)
@@ -401,6 +494,13 @@ class HistoryRow(QWidget):
         outer.setSpacing(0)
         outer.addWidget(self.card)
         self.setToolTip("单击预览 · 双击打开键盘谱 · 右键更多" if _exists(item.keyboard_path) else "单击查看 · 右键更多")
+
+    def xml_state(self, running: bool = False) -> str:
+        """What the MusicXML button does now (see ``musicxml_state``)."""
+        return musicxml_state(self.item.midi_path, self.item.musicxml_path, running)
+
+    def set_xml_state(self, state: str) -> None:
+        set_musicxml_button(self.xml_button, state)
 
     def refresh_icons(self, tokens: dict) -> None:
         for button, name in ((self.keyboard_button, "keyboard"), (self.folder_button, "folder")):
@@ -470,6 +570,9 @@ class MainWindow(QMainWindow):
         self._click_timer = QTimer(self)
         self._click_timer.setSingleShot(True)
         self._click_timer.timeout.connect(self._flush_history_click)
+        # MusicXML is made from a conversion's MIDI when a MusicXML button is pressed
+        self._maker = MusicXmlMaker(parent=self)
+        self._maker.done.connect(self._on_musicxml_done, Qt.ConnectionType.QueuedConnection)
 
         self._build_ui(settings)
         self._build_shortcuts()
@@ -877,10 +980,19 @@ class MainWindow(QMainWindow):
         CHORD_STANDARD: "相差 50 毫秒内算一起按",
         CHORD_LOOSE: "相差 80 毫秒内算一起按",
     }
+    # which model transcribes a piano recording (chosen before converting, not a layout option)
+    PIANO_MODEL_HELP = {
+        MODEL_TRANSKUN: "更准，CPU 上也更快（推荐）",
+        MODEL_KONG: "原来的钢琴模型",
+    }
+    PIANO_MODEL_TIPS = {
+        MODEL_TRANSKUN: "TransKun：在钢琴录音上比 ByteDance 模型准约 1.5 个百分点，CPU 上也更快",
+        MODEL_KONG: "ByteDance（Kong 等人，2020）：软件原来用的钢琴模型",
+    }
 
     def _build_advanced(self) -> QWidget:
-        """琶音写法 and 和弦判定, behind a 高级选项 toggle; remembered between runs, and a
-        change lays out the score in 预览 again at once."""
+        """钢琴识别模型, 琶音写法 and 和弦判定, behind a 高级选项 toggle; remembered between runs. The
+        two layout options lay out the score in 预览 again at once."""
         box = QWidget()
         column = QVBoxLayout(box)
         column.setContentsMargins(0, 0, 0, 0)
@@ -890,7 +1002,7 @@ class MainWindow(QMainWindow):
         self.advanced_button.setIconSize(QSize(14, 14))
         self.advanced_button.setCheckable(True)
         self.advanced_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.advanced_button.setToolTip("琶音写法、和弦判定")
+        self.advanced_button.setToolTip("钢琴识别模型、琶音写法、和弦判定")
         tab_focus(self.advanced_button)
         toggle_row = QHBoxLayout()
         toggle_row.setContentsMargins(10, 4, 12, 4)
@@ -903,6 +1015,34 @@ class MainWindow(QMainWindow):
         inner.setContentsMargins(0, 0, 0, 0)
         inner.setSpacing(0)
         settings = load_settings()
+
+        self.piano_model_label = QLabel("钢琴识别模型")
+        self.piano_model_label.setObjectName("sectionLabel")
+        self.piano_transkun_radio = QRadioButton("TransKun")
+        self.piano_kong_radio = QRadioButton("ByteDance")
+        self._piano_model_radios = {
+            MODEL_TRANSKUN: self.piano_transkun_radio,
+            MODEL_KONG: self.piano_kong_radio,
+        }
+        for model, radio in self._piano_model_radios.items():
+            radio.setToolTip(self.PIANO_MODEL_TIPS[model])
+        self._piano_model_radios.get(settings.get(PIANO_MODEL), self.piano_transkun_radio).setChecked(True)
+        self.piano_model_segment = Segmented(list(self._piano_model_radios.values()))
+        self.piano_model_help = ElidedLabel("")
+        self.piano_model_help.setObjectName("helper")
+        self.piano_model_box = QWidget()
+        piano_model_column = QVBoxLayout(self.piano_model_box)
+        piano_model_column.setContentsMargins(0, 0, 0, 0)
+        piano_model_column.setSpacing(0)
+        piano_model_column.addWidget(self._divider())
+        piano_model_column.addWidget(
+            self._setting_row(self.piano_model_label, self.piano_model_help, self.piano_model_segment)
+        )
+        inner.addWidget(self.piano_model_box)
+        for radio in self._piano_model_radios.values():
+            radio.toggled.connect(lambda checked: checked and self._on_piano_model_changed())
+        self._sync_piano_model_help()
+        self._sync_piano_model_row()
 
         self.arpeggio_label = QLabel("琶音写法")
         self.arpeggio_label.setObjectName("sectionLabel")
@@ -952,8 +1092,27 @@ class MainWindow(QMainWindow):
 
     def _set_advanced_open(self, on: bool) -> None:
         self.advanced_box.setVisible(on)
-        self.advanced_button.setText("收起高级选项" if on else "高级选项：琶音写法、和弦判定")
+        self.advanced_button.setText("收起高级选项" if on else "高级选项：钢琴模型、琶音写法、和弦判定")
         self._refresh_advanced_icon()
+
+    def piano_model(self) -> str:
+        return next(
+            (model for model, radio in self._piano_model_radios.items() if radio.isChecked()),
+            DEFAULT_PIANO_MODEL,
+        )
+
+    def _on_piano_model_changed(self) -> None:
+        save_setting(PIANO_MODEL, self.piano_model())
+        self._sync_piano_model_help()
+
+    def _sync_piano_model_help(self) -> None:
+        self.piano_model_help.setText(self.PIANO_MODEL_HELP[self.piano_model()])
+
+    def _sync_piano_model_row(self) -> None:
+        """The model only matters for a piano recording (not for 其他乐器, MIDI, MusicXML or PDF)."""
+        box = getattr(self, "piano_model_box", None)
+        if box is not None:
+            box.setVisible(self.piano_radio.isChecked() and not _direct_score_path(self._source))
 
     def _refresh_advanced_icon(self) -> None:
         theme = getattr(self, "theme", None)
@@ -1220,12 +1379,27 @@ class MainWindow(QMainWindow):
         self.banner_folder_button.clicked.connect(
             lambda: open_path(self, getattr(self._last_result, "folder", None))
         )
+        self.banner_midi_button = QPushButton("MIDI")
+        self.banner_midi_button.setObjectName("small")
+        self.banner_midi_button.setToolTip("打开 MIDI")
+        self.banner_midi_button.clicked.connect(
+            lambda: open_path(self, getattr(self._last_result, "midi_path", None))
+        )
+        self.banner_xml_button = QPushButton("MusicXML")
+        self.banner_xml_button.setObjectName("small")
+        self.banner_xml_button.clicked.connect(self._on_banner_xml_clicked)
         self.banner_close = QPushButton(icons.glyph("close"))
         self.banner_close.setObjectName("closeBanner")
         self.banner_close.setProperty("glyph", icons.has_icon_font())
         self.banner_close.setToolTip("关闭")
         self.banner_close.clicked.connect(self.hide_banner)
-        for button in (self.banner_keyboard_button, self.banner_folder_button, self.banner_close):
+        for button in (
+            self.banner_keyboard_button,
+            self.banner_folder_button,
+            self.banner_midi_button,
+            self.banner_xml_button,
+            self.banner_close,
+        ):
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.setIconSize(QSize(14, 14))
             tab_focus(button)
@@ -1237,6 +1411,15 @@ class MainWindow(QMainWindow):
         actions.addWidget(self.banner_folder_button)
         actions.addStretch(1)
         text.addLayout(actions)
+        # the other files of the conversion: MIDI is always there, MusicXML is made on demand
+        self.banner_files_row = QWidget()
+        files = QHBoxLayout(self.banner_files_row)
+        files.setContentsMargins(0, 4, 0, 0)
+        files.setSpacing(8)
+        files.addWidget(self.banner_midi_button)
+        files.addWidget(self.banner_xml_button)
+        files.addStretch(1)
+        text.addWidget(self.banner_files_row)
         row.addLayout(text, 1)
         row.addWidget(self.banner_close, 0, Qt.AlignmentFlag.AlignTop)
         banner.hide()
@@ -1378,6 +1561,8 @@ class MainWindow(QMainWindow):
         self.gpu_script_button.setIcon(ico("script", c["text_2"], 14))
         self.banner_keyboard_button.setIcon(ico("keyboard", c["text_2"], 14))
         self.banner_folder_button.setIcon(ico("folder", c["text_2"], 14))
+        self.banner_midi_button.setIcon(ico("midi", c["text_2"], 14))
+        self._sync_banner_files()
         self._sync_start_icon()
         if self._search_action is not None:
             self.search_edit.removeAction(self._search_action)
@@ -1526,6 +1711,7 @@ class MainWindow(QMainWindow):
         self.gpu_radio.setVisible(not direct)
         self.cpu_radio.setVisible(not direct)
         self._sync_gpu_controls()
+        self._sync_piano_model_row()
         is_pdf = _is_pdf_path(self._source)
         self.pdf_note.setVisible(is_pdf)
         self.pdf_box.setVisible(is_pdf)
@@ -1538,6 +1724,7 @@ class MainWindow(QMainWindow):
             self.kind_help.setText("钢琴独奏，识别最准")
         else:
             self.kind_help.setText("吉他、人声等通用识别")
+        self._sync_piano_model_row()
 
     def _show_device_status(self) -> None:
         if not hasattr(self, "device_status_label"):
@@ -1682,6 +1869,8 @@ class MainWindow(QMainWindow):
             self.change_button,
             self.piano_radio,
             self.other_radio,
+            self.piano_transkun_radio,
+            self.piano_kong_radio,
             self.gpu_radio,
             self.cpu_radio,
             self.gpu_download_button,
@@ -1730,6 +1919,8 @@ class MainWindow(QMainWindow):
         self._job_layout = self.layout_options()
         for engine in self._engines.values():
             engine.device = "cuda" if self.gpu_radio.isChecked() else "cpu"
+            if hasattr(engine, "model"):  # the piano engine: TransKun or the ByteDance model
+                engine.model = self.piano_model()
 
         if _is_pdf_path(self._source):
             kind = "pdf"
@@ -1842,14 +2033,80 @@ class MainWindow(QMainWindow):
         has_outputs = kind != "error"
         self.banner_keyboard_button.setVisible(has_outputs)
         self.banner_folder_button.setVisible(has_outputs)
+        self.banner_files_row.setVisible(has_outputs)
         self.banner_keyboard_button.setEnabled(_exists(getattr(result, "keyboard_path", None)))
         self.banner_folder_button.setEnabled(_exists(getattr(result, "folder", None)))
+        self._sync_banner_files()
         self.result_banner.show()
         self.progress_box.hide()
 
     def hide_banner(self) -> None:
         self.result_banner.hide()
         self.progress_box.show()
+
+    # ------------------------------------------------------------ MusicXML
+    def _sync_banner_files(self) -> None:
+        """The banner's MIDI and MusicXML buttons follow the files of the last conversion."""
+        result = self._last_result
+        midi = getattr(result, "midi_path", None)
+        xml = getattr(result, "musicxml_path", None)
+        self.banner_midi_button.setEnabled(_exists(midi))
+        state = musicxml_state(midi, xml, self._maker.is_running(xml))
+        set_musicxml_button(self.banner_xml_button, state)
+        c = self.theme.tokens
+        name = "convert" if state in (XML_MAKE, XML_BUSY) else "document"
+        self.banner_xml_button.setIcon(icons.icon(name, c["text_2"], 14, c["disabled"]))
+
+    def _sync_xml_buttons(self) -> None:
+        """Every MusicXML button shows whether its file is there, can be made, or is being made."""
+        for row in self.history_rows():
+            row.set_xml_state(row.xml_state(self._maker.is_running(row.item.musicxml_path)))
+        self._sync_banner_files()
+
+    def _on_banner_xml_clicked(self) -> None:
+        result = self._last_result
+        self.musicxml_action(
+            getattr(result, "midi_path", None),
+            getattr(result, "musicxml_path", None),
+            getattr(result, "keyboard_path", None),
+        )
+
+    def _on_row_xml_clicked(self, row: HistoryRow) -> None:
+        item = row.item
+        self.musicxml_action(item.midi_path, item.musicxml_path, item.keyboard_path)
+
+    def musicxml_action(self, midi_path, xml_path, keyboard_path=None) -> None:
+        """What a MusicXML button does: open the file; when there is none yet, make it from
+        the MIDI in the background (the button reads 转换中… meanwhile) and open it once it is
+        written."""
+        if _exists(xml_path):
+            open_path(self, xml_path)
+            return
+        if not xml_path or self._maker.is_running(xml_path):
+            return
+        if not _exists(midi_path):
+            self.show_toast("这次转换的 MIDI 文件不在了，没法生成 MusicXML", "error")
+            self._sync_xml_buttons()
+            return
+        self._maker.start(midi_path, xml_path, keyboard_path or "")
+        self._sync_xml_buttons()
+
+    def _on_musicxml_done(self, xml_path: str, error: str) -> None:
+        self._sync_xml_buttons()
+        if error:
+            self.show_toast(error, "error")
+            return
+        try:
+            _startfile(xml_path)
+        except OSError:
+            # no program is set up for MusicXML: show where the file is instead
+            try:
+                _reveal(xml_path)
+            except OSError:
+                pass
+            self.show_toast("MusicXML 已生成，没有程序能直接打开它，已在文件夹里选中", "success")
+            return
+        self.show_toast("MusicXML 已生成", "success")
 
     # ----------------------------------------------------------- history
     def _save_history(self, result) -> HistoryItem:
@@ -1883,6 +2140,8 @@ class MainWindow(QMainWindow):
             row = HistoryRow(item, self.history_list)
             row.refresh_icons(tokens)
             row.menu_requested.connect(self._show_history_menu)
+            row.xml_requested.connect(self._on_row_xml_clicked)
+            row.set_xml_state(row.xml_state(self._maker.is_running(item.musicxml_path)))
             list_item = QListWidgetItem()
             list_item.setData(Qt.ItemDataRole.UserRole, item.id)
             self.history_list.addItem(list_item)

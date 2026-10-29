@@ -69,6 +69,13 @@ def worker_path() -> Path:
     return Path(__file__).resolve().parent / "gpu_worker.py"
 
 
+def transkun_source_dir() -> Path:
+    """The transkun package folder (sources and pretrained weights) that goes into the GPU runtime."""
+    from app import transkun_infer
+
+    return transkun_infer.package_dir()
+
+
 def piano_source_dir() -> Path:
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
@@ -202,6 +209,41 @@ def _copy_piano_sources() -> None:
     )
 
 
+def _transkun_dest() -> Path:
+    return runtime_dir() / "Lib" / "site-packages" / "transkun"
+
+
+def _copy_transkun_sources() -> None:
+    dest = _transkun_dest()
+    if dest.exists():
+        shutil.rmtree(dest)
+    shutil.copytree(
+        transkun_source_dir(),
+        dest,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+
+
+def _transkun_in_runtime() -> bool:
+    source = transkun_source_dir() / "pretrained" / "2.0.pt"
+    target = _transkun_dest() / "pretrained" / "2.0.pt"
+    return (
+        (_transkun_dest() / "ModelTransformer.py").is_file()
+        and target.is_file()
+        and source.is_file()
+        and target.stat().st_size == source.stat().st_size
+    )
+
+
+def ensure_transkun_runtime() -> None:
+    """Put TransKun into a GPU runtime that was installed before it was supported (a local copy, no download)."""
+    try:
+        if not _transkun_in_runtime():
+            _copy_transkun_sources()
+    except (OSError, ImportError) as exc:
+        raise GpuSetupError(f"没能把 TransKun 放进 GPU 组件：{exc}") from exc
+
+
 def install(cancel: Event | None = None, on_progress=None) -> None:
     report = on_progress or (lambda _message, _ratio: None)
     if gpu_installed():
@@ -269,6 +311,10 @@ def install(cancel: Event | None = None, on_progress=None) -> None:
     )
     report("正在放入钢琴模型代码", 0.99)
     _copy_piano_sources()
+    try:
+        _copy_transkun_sources()
+    except (OSError, ImportError):
+        pass  # an app without TransKun still gets a working ByteDance piano model on the GPU
     report("正在检查 GPU 组件", 0.995)
     _run(
         [
@@ -288,6 +334,8 @@ def transcribe_with_gpu(kind: str, audio: Path, midi: Path, checkpoint: Path | N
     if not gpu_installed():
         raise GpuSetupError("还没有安装 GPU 组件。请先点「下载 GPU 组件」。")
     _check_cancel(cancel)
+    if kind == "transkun":
+        ensure_transkun_runtime()
     cmd = [str(python_exe()), str(worker_path()), kind, str(audio), str(midi)]
     if checkpoint is not None:
         cmd.append(str(checkpoint))

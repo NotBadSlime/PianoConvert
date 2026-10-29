@@ -13,3 +13,5 @@ torchaudio
 setuptools>=65,<81
 pytest>=8.0
 pyinstaller>=6.0
+# TransKun (the default piano model) is installed without its training-only dependencies:
+#   pip install --no-deps transkun==2.0.1

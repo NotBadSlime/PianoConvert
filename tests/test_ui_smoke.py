@@ -46,7 +46,7 @@ def test_choosing_file_enables_start(tmp_path):
     assert "a.mp3" in win.file_label.text()
 
 
-def test_partial_row_disables_musicxml(tmp_path, monkeypatch):
+def test_partial_row_offers_musicxml_from_the_midi(tmp_path, monkeypatch):
     hist = tmp_path / "h.json"
     monkeypatch.setattr("app.history.history_path", lambda: hist)
     midi = tmp_path / "t.mid"
@@ -70,11 +70,30 @@ def test_partial_row_disables_musicxml(tmp_path, monkeypatch):
     win.reload_history()
     row = win.history_list.itemWidget(win.history_list.item(0))
     assert row is not None
-    assert row.xml_button.isEnabled() is False
+    # the MusicXML is not there, but it can be made from the MIDI
+    assert row.xml_button.isEnabled() is True
+    assert row.xml_button.text() == "转 MusicXML"
     assert row.midi_button.isEnabled() is True
     assert row.keyboard_button.isEnabled() is False
     assert row.folder_button.text() == "打开文件夹"
     assert row.sizeHint().width() <= 360
+
+
+def test_row_without_midi_and_musicxml_has_nothing_to_open_or_make(tmp_path, monkeypatch):
+    hist = tmp_path / "h.json"
+    monkeypatch.setattr("app.history.history_path", lambda: hist)
+    append_item(
+        HistoryItem(
+            id="1", title="t", source_path="x", kind="piano", created_at="2026-01-01T00:00:00", status="partial",
+            midi_path=str(tmp_path / "gone.mid"), musicxml_path=str(tmp_path / "gone.musicxml"),
+            folder=str(tmp_path), error="谱面导出失败",
+        )
+    )
+    app = QApplication.instance() or QApplication([])
+    win = MainWindow(engines={})
+    row = win.history_rows()[0]
+    assert (row.midi_button.isEnabled(), row.xml_button.isEnabled()) == (False, False)
+    assert row.xml_button.text() == "MusicXML"
 
 
 def test_score_file_hides_instrument_and_changes_start(tmp_path):
@@ -779,3 +798,208 @@ def test_changing_the_arpeggio_setting_lays_out_the_preview_again(tmp_path, isol
     text = result.keyboard_path.read_text(encoding="utf-8")
     assert "(ZCBA)" in text and "{" not in text.split("【键盘谱】")[1]
     assert "(ZCBA)" in win.preview.text()
+
+
+# ---------------------------------------------------------------- MusicXML on demand
+
+
+def _wait_until(predicate, timeout=8.0):
+    """Run the event loop (the MusicXML thread reports back through it) until predicate() holds."""
+    import time
+
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        QApplication.processEvents()
+        if predicate():
+            return True
+        QTest.qWait(10)
+    return bool(predicate())
+
+
+def _conversion_files(folder, with_xml=False):
+    """What a finished conversion leaves: a MIDI, the keyboard score and, if asked, a MusicXML."""
+    midi = folder / "曲.mid"
+    pm = pretty_midi.PrettyMIDI(initial_tempo=120)
+    inst = pretty_midi.Instrument(program=0)
+    inst.notes.append(pretty_midi.Note(80, 60, 0.0, 0.4))
+    pm.instruments.append(inst)
+    pm.write(str(midi))
+    keyboard = folder / "曲_键盘谱.txt"
+    keyboard.write_text("k", encoding="utf-8")
+    xml = folder / "曲.musicxml"
+    if with_xml:
+        xml.write_text("<score-partwise/>", encoding="utf-8")
+    return midi, xml, keyboard
+
+
+def _record(folder, midi, xml, keyboard, ident="1"):
+    return HistoryItem(
+        id=ident, title="曲", source_path="曲.mid", kind="score", created_at="2026-01-01T00:00:00",
+        status="success", midi_path=str(midi), musicxml_path=str(xml), folder=str(folder), error="",
+        keyboard_path=str(keyboard),
+    )
+
+
+def _stand_in_writer(monkeypatch, calls, gate=None, fail=None):
+    """A quick stand-in for the MusicXML writer (the real one is music21, tested elsewhere)."""
+
+    def make(midi_path, xml_path, keyboard_path=None):
+        calls.append((str(midi_path), str(xml_path), str(keyboard_path)))
+        if gate is not None:
+            gate.wait(10)
+        if fail is not None:
+            raise fail
+        Path(xml_path).write_text("<score-partwise/>", encoding="utf-8")
+
+    monkeypatch.setattr("app.ui.main_window.make_musicxml", make)
+
+
+def test_musicxml_button_makes_the_file_from_the_midi_then_opens_it(tmp_path, isolated_history, monkeypatch):
+    import threading
+
+    opened, calls, gate = [], [], threading.Event()
+    monkeypatch.setattr("app.ui.main_window._startfile", lambda p: opened.append(p))
+    _stand_in_writer(monkeypatch, calls, gate=gate)
+    midi, xml, keyboard = _conversion_files(tmp_path)
+    append_item(_record(tmp_path, midi, xml, keyboard))
+    _app()
+    win = MainWindow(engines={})
+    row = win.history_rows()[0]
+    assert (row.xml_button.text(), row.xml_button.isEnabled()) == ("转 MusicXML", True)
+    assert "MIDI" in row.xml_button.toolTip()
+
+    row.xml_button.click()
+    assert (row.xml_button.text(), row.xml_button.isEnabled()) == ("转换中…", False)
+    assert win._maker.is_running(xml)
+    # the window stays usable, and rows built meanwhile know the file is being made
+    win.reload_history()
+    row = win.history_rows()[0]
+    assert (row.xml_button.text(), row.xml_button.isEnabled()) == ("转换中…", False)
+    assert row.midi_button.isEnabled() is True
+
+    gate.set()
+    assert _wait_until(lambda: row.xml_button.text() == "MusicXML")
+    assert row.xml_button.isEnabled() is True
+    assert calls == [(str(midi), str(xml), str(keyboard))]      # made from the MIDI, on the keyboard score's grid
+    assert xml.read_text(encoding="utf-8") == "<score-partwise/>"
+    assert opened == [str(xml)]                                   # opened by itself once it was written
+    assert win.toast.text() == "MusicXML 已生成" and win.toast.tone() == "success"
+
+    row.xml_button.click()                                        # from now on the button just opens it
+    assert opened == [str(xml), str(xml)] and len(calls) == 1
+
+
+def test_musicxml_that_cannot_be_made_is_reported_and_can_be_tried_again(tmp_path, isolated_history, monkeypatch):
+    opened, calls = [], []
+    monkeypatch.setattr("app.ui.main_window._startfile", lambda p: opened.append(p))
+    _stand_in_writer(monkeypatch, calls, fail=RuntimeError("boom"))
+    midi, xml, keyboard = _conversion_files(tmp_path)
+    append_item(_record(tmp_path, midi, xml, keyboard))
+    _app()
+    win = MainWindow(engines={})
+    row = win.history_rows()[0]
+    row.xml_button.click()
+    assert _wait_until(lambda: win.toast.text().startswith("没能生成 MusicXML：boom"))
+    assert win.toast.tone() == "error"
+    assert (row.xml_button.text(), row.xml_button.isEnabled()) == ("转 MusicXML", True)
+    assert opened == [] and not xml.exists()
+
+    _stand_in_writer(monkeypatch, calls)
+    row.xml_button.click()
+    assert _wait_until(lambda: row.xml_button.text() == "MusicXML")
+    assert opened == [str(xml)] and xml.exists() and len(calls) == 2
+
+
+def test_musicxml_already_there_is_opened_not_made_again(tmp_path, isolated_history, monkeypatch):
+    opened, calls = [], []
+    monkeypatch.setattr("app.ui.main_window._startfile", lambda p: opened.append(p))
+    _stand_in_writer(monkeypatch, calls)
+    midi, xml, keyboard = _conversion_files(tmp_path, with_xml=True)
+    append_item(_record(tmp_path, midi, xml, keyboard))
+    _app()
+    win = MainWindow(engines={})
+    row = win.history_rows()[0]
+    assert (row.xml_button.text(), row.xml_button.isEnabled()) == ("MusicXML", True)
+    row.xml_button.click()
+    assert opened == [str(xml)] and calls == []
+    # with the MIDI gone there is nothing to make it from
+    win.musicxml_action(tmp_path / "gone.mid", tmp_path / "gone.musicxml", None)
+    assert "MIDI 文件不在了" in win.toast.text() and win.toast.tone() == "error"
+    assert calls == []
+
+
+def test_made_musicxml_is_shown_in_the_folder_when_no_program_opens_it(tmp_path, isolated_history, monkeypatch):
+    revealed, calls = [], []
+
+    def no_program(path):
+        raise OSError(1155, "No application is associated with the specified file")
+
+    monkeypatch.setattr("app.ui.main_window._startfile", no_program)
+    monkeypatch.setattr("app.ui.main_window._reveal", lambda p: revealed.append(p))
+    _stand_in_writer(monkeypatch, calls)
+    midi, xml, keyboard = _conversion_files(tmp_path)
+    append_item(_record(tmp_path, midi, xml, keyboard))
+    _app()
+    win = MainWindow(engines={})
+    row = win.history_rows()[0]
+    row.xml_button.click()
+    assert _wait_until(lambda: row.xml_button.text() == "MusicXML")
+    assert revealed == [str(xml)]
+    assert "已在文件夹里选中" in win.toast.text() and win.toast.tone() == "success"
+
+
+def test_banner_offers_midi_and_musicxml_of_the_new_conversion(tmp_path, isolated_history, monkeypatch):
+    import threading
+
+    opened, calls, gate = [], [], threading.Event()
+    monkeypatch.setattr("app.ui.main_window._startfile", lambda p: opened.append(p))
+    _stand_in_writer(monkeypatch, calls, gate=gate)
+    midi, xml, keyboard = _conversion_files(tmp_path)
+    _app()
+    win = MainWindow(engines={})
+    win.set_source_file(midi)
+    win._enter_busy_ui()
+    win._on_finished(ConvertResult(
+        status="success", folder=tmp_path, midi_path=midi, musicxml_path=xml, error="", title="曲",
+        kind="score", source_path=midi, keyboard_path=keyboard,
+    ))
+    assert win.banner_files_row.isHidden() is False
+    assert win.banner_midi_button.isEnabled() is True
+    assert (win.banner_xml_button.text(), win.banner_xml_button.isEnabled()) == ("转 MusicXML", True)
+    win.banner_midi_button.click()
+    assert opened == [str(midi)]
+
+    win.banner_xml_button.click()
+    assert (win.banner_xml_button.text(), win.banner_xml_button.isEnabled()) == ("转换中…", False)
+    assert win.history_rows()[0].xml_button.text() == "转换中…"      # the record of this conversion follows
+    gate.set()
+    assert _wait_until(lambda: win.banner_xml_button.text() == "MusicXML")
+    assert win.history_rows()[0].xml_button.text() == "MusicXML"
+    assert opened[-1] == str(xml) and len(calls) == 1
+
+    # a failed conversion has no files to offer
+    win._enter_busy_ui()
+    win._on_failed("坏了")
+    assert win.banner_files_row.isHidden() is True
+
+
+def test_musicxml_maker_makes_one_file_at_a_time(tmp_path):
+    import threading
+
+    from app.ui.main_window import MusicXmlMaker
+
+    _app()
+    gate, calls = threading.Event(), []
+
+    def make(midi_path, xml_path, keyboard_path=None):
+        calls.append(xml_path)
+        gate.wait(10)
+
+    maker = MusicXmlMaker(make=make)
+    xml = tmp_path / "a.musicxml"
+    assert maker.start(tmp_path / "a.mid", xml) is True
+    assert maker.is_running(xml) is True
+    assert maker.start(tmp_path / "a.mid", xml) is False          # that file is already being made
+    gate.set()
+    assert _wait_until(lambda: not maker.is_running(xml))
+    assert len(calls) == 1

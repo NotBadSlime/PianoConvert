@@ -75,6 +75,13 @@ hiddenimports = [
     "app.engines.base",
     "app.engines.kong_piano",
     "app.engines.basic_pitch",
+    "app.engines.piano",
+    "app.engines.transkun_piano",
+    "app.transkun_infer",
+    # transkun itself is shipped as source (see datas), so its own imports are listed here
+    "torchaudio",
+    "torch.distributed",
+    "mir_eval",
     "basic_pitch",
     "basic_pitch.inference",
     "onnxruntime",
@@ -106,7 +113,13 @@ datas.append((str(root / "assets" / "PianoConvert.ico"), "assets"))
 datas.append((str(root / "assets" / "venti-background.png"), "assets"))
 datas.append((str(root / "scripts" / "install_gpu.ps1"), "scripts"))
 datas.append((str(root / "app" / "gpu_worker.py"), "app"))
+# the GPU worker imports this file from beside itself
+datas.append((str(root / "app" / "transkun_infer.py"), "app"))
 datas.append((str(root / "piano_transcription_inference"), "piano_transcription_inference_src"))
+# TransKun is shipped as plain source, not compiled into the exe (it is excluded from Analysis below):
+# its CRF uses torch.jit.script, which reads the .py files at run time. The same folder holds the weights
+# the app reads and the copy the GPU runtime gets.
+datas.append((str(_package_dir("transkun")), "transkun"))
 datas += collect_data_files("torchlibrosa")
 datas += collect_data_files("basic_pitch")
 datas += collect_data_files("resampy")
@@ -150,6 +163,7 @@ a = Analysis(
         "tensorboard",
         "tkinter",
         "music21",
+        "transkun",
     ],
     noarchive=False,
 )

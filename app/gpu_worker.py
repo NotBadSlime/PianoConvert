@@ -35,11 +35,30 @@ def _other(audio: str, midi: str) -> None:
     midi_data.write(midi)
 
 
+def _transkun(audio: str, midi: str, device: str = "cuda") -> None:
+    import os
+
+    # transkun_infer.py sits next to this file; the transkun package itself was copied into the runtime
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import transkun_infer
+
+    model = transkun_infer.load_model(device)
+    transkun_infer.transcribe_file(
+        model,
+        audio,
+        midi,
+        device,
+        on_progress=lambda ratio: print(f"PROGRESS\t{0.45 + 0.2 * ratio:.4f}\t正在用 GPU 转录", flush=True),
+    )
+
+
 def main() -> None:
     kind, audio, midi = sys.argv[1], sys.argv[2], sys.argv[3]
     print("PROGRESS\t0.45\t正在用 GPU 转录", flush=True)
     if kind == "piano":
         _piano(audio, midi, sys.argv[4])
+    elif kind == "transkun":
+        _transkun(audio, midi)
     elif kind == "other":
         _other(audio, midi)
     else:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import shutil
 from dataclasses import dataclass
@@ -59,6 +60,19 @@ def humanize_error(exc: BaseException) -> str:
     if isinstance(exc, ModuleNotFoundError) or "no module named" in low:
         return "安装包不完整，请安装官网最新版后重试"
     return f"转录失败：{text[:180]}"
+
+
+def musicxml_error_text(exc: BaseException) -> str:
+    """Why a MusicXML could not be made, as a sentence for the user."""
+    if isinstance(exc, ConvertError):
+        return str(exc)
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) in {13, 28}:
+        reason = "无法写入输出目录"
+    elif isinstance(exc, ModuleNotFoundError):
+        reason = "安装包不完整，请安装官网最新版后重试"
+    else:
+        reason = str(exc) or exc.__class__.__name__
+    return f"没能生成 MusicXML：{reason}"[:200]
 
 
 def _stamp_dir(output_root: Path, source: Path) -> Path:
@@ -127,17 +141,14 @@ def _fatal(exc: BaseException) -> bool:
     return isinstance(exc, OSError) and getattr(exc, "errno", None) in {13, 28}
 
 
-def _complete_outputs(
-    midi_path: Path,
-    xml_path: Path,
-    keyboard_text: str,
-    progress,
-    cancel: Event,
-    errors: list[str],
-) -> None:
-    """Every conversion leaves a MIDI and a MusicXML file beside the keyboard score: the
-    one the source did not give is made from the other (the MusicXML on the keyboard
-    score's rhythm grid)."""
+def _ensure_midi(midi_path: Path, xml_path: Path, progress, cancel: Event, errors: list[str]) -> None:
+    """Every conversion leaves a MIDI file beside the keyboard score.
+
+    A recording, a MIDI file, a jianpu picture and a notation-software PDF are MIDI to begin
+    with. A MusicXML file, or a staff score read from a picture, is turned into one here
+    (quick). The MusicXML of the others is slow to make, so it is made only when asked for
+    (``make_musicxml``).
+    """
     if cancel.is_set():
         raise CancelledError()
     if not midi_path.exists() and xml_path.exists():
@@ -150,16 +161,36 @@ def _complete_outputs(
             errors.append("MIDI 导出失败")
     if cancel.is_set():
         raise CancelledError()
-    if not xml_path.exists() and midi_path.exists():
+
+
+def make_musicxml(
+    midi_path: Path | str,
+    xml_path: Path | str,
+    keyboard_path: Path | str | None = None,
+) -> Path:
+    """Write the MusicXML of a conversion from its MIDI file (the MusicXML button).
+
+    It is the slow part of a conversion, about a second for a short piece and ten and more for
+    a long one, so it is done only when asked for. The notes are rounded to the rhythm grid of
+    the conversion's keyboard score (when that file is there), so both show the same rhythm.
+    The file appears under its final name only once it is complete. Returns ``xml_path``.
+    """
+    midi_path, xml_path = Path(midi_path), Path(xml_path)
+    if not midi_path.is_file():
+        raise ConvertError("这次转换的 MIDI 文件不在了，没法生成 MusicXML")
+    divisors = None
+    if keyboard_path and Path(keyboard_path).is_file():
         try:
-            progress("写入 MusicXML", 0.9)
-            midi_to_musicxml(midi_path, xml_path, _grid_divisors(keyboard_text))
-        except Exception as exc:  # noqa: BLE001
-            if _fatal(exc):
-                raise
-            errors.append(f"MusicXML 导出失败：{exc}"[:200])
-    if cancel.is_set():
-        raise CancelledError()
+            divisors = _grid_divisors(Path(keyboard_path).read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            pass  # the default grid then
+    part = xml_path.with_name(f"{xml_path.stem}.writing{xml_path.suffix}")
+    try:
+        midi_to_musicxml(midi_path, part, divisors)
+        os.replace(part, xml_path)
+    finally:
+        part.unlink(missing_ok=True)
+    return xml_path
 
 
 def _with_note(text: str, note: str) -> str:
@@ -282,11 +313,10 @@ def run(
         if not midi_path.exists():
             raise RuntimeError("引擎没有写出 MIDI")
         errors: list[str] = []
-        text = ""
         try:
             progress("写入键盘谱", 0.8)
             # transcribed from audio: onsets are not on a grid
-            text = _write_keyboard(
+            _write_keyboard(
                 midi_path,
                 keyboard_path,
                 work,
@@ -303,7 +333,8 @@ def run(
                 errors.append("无法写入输出目录")
             else:
                 errors.append("键盘谱导出失败")
-        _complete_outputs(midi_path, xml_path, text, progress, cancel, errors)
+        if cancel.is_set():
+            return _cancelled_result()
         if errors:
             return _pack("partial", "；".join(errors))
         progress("完成", 1.0)
@@ -367,9 +398,9 @@ def run_score(
         if cancel.is_set():
             return _cancelled_result()
         progress("写入键盘谱", 0.6)
-        text = _write_keyboard(copied, keyboard_path, work, style=style, range_strategy=range_strategy, arpeggio=arpeggio, chord=chord)
+        _write_keyboard(copied, keyboard_path, work, style=style, range_strategy=range_strategy, arpeggio=arpeggio, chord=chord)
         errors: list[str] = []
-        _complete_outputs(midi_path, xml_path, text, progress, cancel, errors)
+        _ensure_midi(midi_path, xml_path, progress, cancel, errors)
         if errors:
             return _pack("partial", "；".join(errors))
         progress("完成", 1.0)
@@ -470,7 +501,7 @@ def run_pdf(
         text = text.rstrip() + "\n\n" + fingertip
         keyboard_path.write_text(text, encoding="utf-8")
         errors: list[str] = []
-        _complete_outputs(midi_path, xml_path, text, progress, cancel, errors)
+        _ensure_midi(midi_path, xml_path, progress, cancel, errors)
         if errors:
             return _pack("partial", "；".join(errors))
         progress("完成", 1.0)

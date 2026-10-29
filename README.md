@@ -20,7 +20,7 @@ Windows 桌面程序 · 中文界面 · 本地运行
 ## 功能
 
 - **四种来源都能转**
-  - 歌曲录音（mp3 / wav / flac / ogg / m4a）：用钢琴转录模型或通用模型转成 MIDI、MusicXML 和键盘谱
+  - 歌曲录音（mp3 / wav / flac / ogg / m4a）：钢琴录音用 TransKun 钢琴转录模型，其他乐器用通用模型，转成键盘谱和 MIDI
   - MIDI、MusicXML（mid / midi / musicxml / xml / mxl）：直接排成键盘谱
   - 打谱软件导出的五线谱 PDF：直接读取谱面上的音符、休止符、升降号、连音线、反复记号、琶音和倚音，速度快、基本不会认错
   - 扫描件、照片、截图（pdf / png / jpg）：用图像识别读五线谱或双手简谱
@@ -41,11 +41,11 @@ Windows 桌面程序 · 中文界面 · 本地运行
 ## 快速上手
 
 1. 把文件拖进窗口，或点击选择文件（`Ctrl+O`）。
-2. 如果是歌曲录音，选择乐器类型（钢琴 / 其他乐器）和计算设备（CPU / GPU）。
-3. 选择键盘谱样式（详细 / 简洁）和音域处理方式，点 **开始转换**（`Ctrl+Enter`）。转换中可以随时取消。需要的话，展开 **高级选项** 调整琶音写法和和弦判定。
+2. 如果是歌曲录音，选择乐器类型（钢琴 / 其他乐器）和计算设备（CPU / GPU）。钢琴录音默认用 TransKun 模型，想换回原来的 ByteDance 模型，在 **高级选项 → 钢琴识别模型** 里选。
+3. 选择键盘谱样式（详细 / 简洁）和音域处理方式，点 **开始转换**（`Ctrl+Enter`）。转换中可以随时取消。需要的话，展开 **高级选项** 调整钢琴识别模型、琶音写法和和弦判定。
 4. 转完后在右侧预览键盘谱，可以直接复制，或者打开文件、打开所在文件夹。
 
-每次转换的结果放在 `文档\PianoConvert\Output\<歌名>_<日期时间>\`，每次都有三样：键盘谱 `<歌名>_键盘谱.txt`、MIDI 和 MusicXML。来源本身只有其中一种（比如 MIDI 文件、打谱软件导出的 PDF、看图识别的五线谱）时，另一种由软件转换生成，节奏和键盘谱的格子一致。以前的转换都在右侧「记录」里，可以搜索、预览和重新打开。
+每次转换的结果放在 `文档\PianoConvert\Output\<歌名>_<日期时间>\`，每次都有键盘谱 `<歌名>_键盘谱.txt` 和 MIDI（歌曲录音、简谱、打谱软件导出的 PDF 读出来的就是 MIDI，MIDI 文件本身就是；MusicXML 文件和看图识别的五线谱会顺手转出 MIDI）。**MusicXML 要用时再转**：转换完成后结果条里、右侧「记录」每一条里都有 **转 MusicXML** 按钮，点一下用这次的 MIDI 生成（短的曲子几秒，长的要十几秒，期间软件照常能用），生成后自动打开，以后再点就直接打开；节奏和键盘谱的格子一致。来源本身是 MusicXML 文件或看图识别的五线谱时，MusicXML 就是原文件，直接打开。以前的转换都在右侧「记录」里，可以搜索、预览和重新打开。
 
 ## 键盘谱长什么样
 
@@ -96,6 +96,9 @@ C 大调和 A 小调的曲子不会移调。别的调会整首移到 C 调白键
 **音域处理怎么选？**
 默认使用新版逐音八度折叠：每个音独立移进 C3–B5。也可以选择旧版智能乐句移调，尽量保持旋律和弦的整体八度。两种方式都会把黑键改成相邻白键，选择会被记住；生成谱头会写入本次处理的移调、改键和折叠统计。
 
+**钢琴录音用哪个识别模型？**
+默认的 TransKun 在 MAESTRO 钢琴录音上实测比原来的 ByteDance 模型准约 1.5 个百分点（起音 F1 约 0.98 对 0.97），CPU 上也更快；音符会按延音踏板延长，键盘谱里 `-` 和 `0` 的写法和原来一致。想对比或换回去，在 **高级选项 → 钢琴识别模型** 里选 ByteDance，选择会被记住。这个选项只对「钢琴」录音有用。
+
 **琶音 `{ }` 不好弹，或者想照原样一个个弹？**
 在 **高级选项 → 琶音写法** 里选「一起按」（写成 `( )`）或「分开写」（MIDI 里弹出来的琶音按先后分格）。
 
@@ -106,6 +109,9 @@ C 大调和 A 小调的曲子不会移调。别的调会整首移到 C 调白键
 
 **谱头写着 ♩=90「只是默认值」？**
 这份 PDF 上没有印速度，软件用了默认的每分钟 90 拍，可以按自己的感觉调整快慢。
+
+**想要 MusicXML（比如导进 MuseScore 接着改）？**
+转换完成后点结果条里的 **转 MusicXML**，或者在「记录」里找到那一条，点同名按钮。软件用这次的 MIDI 生成，节奏按键盘谱的格子取整；歌曲录音转出来的 MIDI 本来就不规整，生成的 MusicXML 只能当草稿。生成好的文件留在这次的结果文件夹里。
 
 **转歌曲很慢？**
 窗口底部写着「使用 CPU」时，有 NVIDIA 显卡可以切换到 GPU，并按提示下载 GPU 组件（约 2.3 GB，可中途取消、下次接着下）。
@@ -127,7 +133,10 @@ py -3.10 -m venv .venv
 .venv\Scripts\python -m pip install --ignore-requires-python --no-deps homr==0.7.0
 .venv\Scripts\python -m pip install musicxml==1.4 "opencv-python-headless>=4.10,<4.13" "pypdfium2>=4,<6" "rapidocr>=3.7,<4"
 
-# 钢琴转录模型（约 165 MB）
+# 钢琴转录模型 TransKun（权重随包自带；不装它为训练准备的依赖）
+.venv\Scripts\python -m pip install --no-deps transkun==2.0.1
+
+# ByteDance 钢琴转录模型（约 165 MB）
 .\scripts\download_model.ps1 -Output "models\note_F1=0.9677_pedal_F1=0.9186.pth"
 
 # 启动
@@ -154,7 +163,8 @@ py -3.10 -m venv .venv
 ```text
 app/
   ui/                界面（PySide6）
-  engines/           歌曲转录引擎（钢琴模型、Basic Pitch）
+  engines/           歌曲转录引擎（TransKun、ByteDance 钢琴模型、Basic Pitch）
+  transkun_infer.py  TransKun 钢琴转录（应用和 GPU 组件共用）
   convert.py         转换流程
   keyboard_score.py  键盘谱排版
   pdf_vector.py      读取打谱软件导出的 PDF
@@ -173,7 +183,8 @@ PianoConvert 使用了这些开源项目（版权和许可证归各自作者所�
 
 | 项目 | 用途 | 许可证 |
 |---|---|---|
-| [piano_transcription_inference](https://github.com/qiuqiangkong/piano_transcription_inference) | 钢琴录音转录 | 见原项目 |
+| [TransKun](https://github.com/Yujia-Yan/Transkun) | 钢琴录音转录（默认） | MIT |
+| [piano_transcription_inference](https://github.com/qiuqiangkong/piano_transcription_inference) | 钢琴录音转录（ByteDance 模型，可选） | 见原项目 |
 | [Basic Pitch](https://github.com/spotify/basic-pitch) | 其他乐器录音转录 | Apache-2.0 |
 | [homr](https://github.com/liebharc/homr) | 扫描件、图片五线谱识别 | AGPL-3.0 |
 | [RapidOCR](https://github.com/RapidAI/RapidOCR) | 简谱识别中的文字识别 | Apache-2.0 |

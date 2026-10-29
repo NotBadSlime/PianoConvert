@@ -12,6 +12,7 @@ PREVIEW_ZOOM = "preview_zoom"      # percent, 70 … 200
 PREVIEW_SECTION = "preview_section"  # "keyboard" / "jianpu" / "fingertip" / "all"
 ARPEGGIO = "arpeggio"             # "auto" / "chord" / "spread": how rolled chords are written
 CHORD = "chord"                   # "strict" / "standard" / "loose": what counts as struck together
+PIANO_MODEL = "piano_model"       # "transkun" / "kong": which model transcribes a piano recording
 DEFAULTS = {
     SCORE_STYLE: "detailed",
     RANGE_STRATEGY: "modern",
@@ -20,6 +21,7 @@ DEFAULTS = {
     PREVIEW_SECTION: "keyboard",
     ARPEGGIO: "auto",
     CHORD: "standard",
+    PIANO_MODEL: "transkun",
 }
 
 
