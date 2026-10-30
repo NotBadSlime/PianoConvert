@@ -25,8 +25,10 @@ ORT_URL = (
 
 DOWNLOADS = (
     ("Python", EMBED_URL, "python-embed.zip", 0.00, 0.02),
-    ("PyTorch", TORCH_URL, "torch-cu130.whl", 0.02, 0.78),
-    ("torchaudio", TORCHAUDIO_URL, "torchaudio-cu130.whl", 0.78, 0.80),
+    # Keep the full wheel filenames. pip parses the package name/version from the
+    # filename, so a shortened name such as ``torch-cu130.whl`` is invalid.
+    ("PyTorch", TORCH_URL, "torch-2.14.0+cu130-cp310-cp310-win_amd64.whl", 0.02, 0.78),
+    ("torchaudio", TORCHAUDIO_URL, "torchaudio-2.11.0+cu130-cp310-cp310-win_amd64.whl", 0.78, 0.80),
     ("ONNX GPU", ORT_URL, "onnxruntime-gpu.whl", 0.80, 0.96),
     ("pip", GET_PIP_URL, "get-pip.py", 0.96, 0.97),
 )
@@ -278,7 +280,7 @@ def install(cancel: Event | None = None, on_progress=None) -> None:
     report("正在安装 GPU 组件", 0.98)
     _run([py, "-m", "pip", "install", "setuptools>=65,<81"], cancel)
     _run(
-        [py, "-m", "pip", "install", "--no-deps", "--force-reinstall", str(paths["torch-cu130.whl"]), str(paths["torchaudio-cu130.whl"])],
+        [py, "-m", "pip", "install", "--no-deps", "--force-reinstall", str(paths["torch-2.14.0+cu130-cp310-cp310-win_amd64.whl"]), str(paths["torchaudio-2.11.0+cu130-cp310-cp310-win_amd64.whl"])],
         cancel,
     )
     _run(
@@ -306,7 +308,7 @@ def install(cancel: Event | None = None, on_progress=None) -> None:
         cancel,
     )
     _run(
-        [py, "-m", "pip", "install", "--no-deps", "--force-reinstall", str(paths["torch-cu130.whl"]), str(paths["onnxruntime-gpu.whl"])],
+        [py, "-m", "pip", "install", "--no-deps", "--force-reinstall", str(paths["torch-2.14.0+cu130-cp310-cp310-win_amd64.whl"]), str(paths["onnxruntime-gpu.whl"])],
         cancel,
     )
     report("正在放入钢琴模型代码", 0.99)
