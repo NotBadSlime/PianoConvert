@@ -9,6 +9,9 @@ basic-pitch>=0.3
 onnxruntime>=1.17
 piano_transcription_inference>=0.0.5
 torch
+torchvision==0.29.0
+Pillow>=10
+scipy>=1.11
 torchaudio
 setuptools>=65,<81
 pytest>=8.0

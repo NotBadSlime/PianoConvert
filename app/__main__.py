@@ -10,6 +10,11 @@ def main() -> None:
 
         homr_entry(sys.argv[sys.argv.index("--homr") + 1])
         return
+    if "--copista" in sys.argv:
+        from app.copista_runtime import entry
+
+        entry(sys.argv[sys.argv.index("--copista") + 1])
+        return
     if "--convert-score" in sys.argv:
         # Headless check of the PDF / image route, used to verify a packaged build:
         #   PianoConvert.exe --convert-score <file> <output folder>

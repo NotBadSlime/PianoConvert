@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 import shutil
 from dataclasses import dataclass
@@ -114,6 +115,8 @@ def _write_keyboard(
 
 _GRID_HEAD = re.compile(r"(\d+)/(\d+)\s+♩=\S+\s+每拍 (\d+) 格")
 _METER_CHANGE = re.compile(r"〔[^〕]*?(\d+)/(\d+)")
+_TUPLET_BEAT = re.compile(r"〈(\d+)〉")
+_SHORT_BEAT = re.compile(r"〈(\d+)/(\d+)拍〉〈(\d+)〉")
 
 
 def _grid_divisors(keyboard_text: str) -> tuple[int, ...] | None:
@@ -130,8 +133,23 @@ def _grid_divisors(keyboard_text: str) -> tuple[int, ...] | None:
     main = keyboard_text.split("【指尖键盘谱】", 1)[0]  # the appended section has its own layout
     denominators = {int(head.group(2))} | {int(m.group(2)) for m in _METER_CHANGE.finditer(main)}
     # cells per quarter is k * d / 4; the smallest whole number of steps per quarter that
-    # holds every cell boundary is the numerator of that fraction
-    divisors = sorted({Fraction(k * d, 4).numerator for d in denominators if k > 0 and d > 0})
+    # holds every cell boundary is the numerator of that fraction. A beat split into n
+    # cells of its own (〈n〉) adds n * d / 4.
+    splits = {int(m.group(1)) for m in _TUPLET_BEAT.finditer(main)}
+    divisors = sorted(
+        {Fraction(c * d, 4).numerator for c in {k} | splits for d in denominators if c > 0 and d > 0}
+        | {Fraction(int(m.group(3)) * d * int(m.group(2)), 4 * int(m.group(1))).numerator
+           for m in _SHORT_BEAT.finditer(main) for d in denominators if int(m.group(1)) > 0}
+    )
+    if _SHORT_BEAT.search(main):
+        # After a fractional short beat, later attacks can share a shifted
+        # phase (e.g. 10/3 + 1/4 = 43/12). Local cell sizes alone cannot
+        # express that phase when music21 rounds absolute MIDI offsets.
+        from app.keyboard_score import read_keyboard_cells
+        divisors = sorted(set(divisors) | {
+            Fraction(q).limit_denominator(65536).denominator
+            for cell in read_keyboard_cells(main) for q in (cell.q, cell.q + cell.slot)
+        })
     return tuple(divisors) or None
 
 
@@ -490,12 +508,30 @@ def run_pdf(
 
             note = "# 由 PDF 谱面上的音符直接读取（不是看图识别），请仍对照原谱弹奏。\n"
             if not tempo_printed(result_path):
-                note += f"# 谱上没有标速度，♩={int(DEFAULT_BPM)} 只是默认值。\n"
+                note += f"# 开头未识别到速度，起始 ♩={int(DEFAULT_BPM)} 是默认值；后续已识别的变速仍保留。\n"
         else:
             kind_text = "简谱" if is_midi else ""
             note = f"# 由{'图片' if is_image else ' PDF '}{kind_text}自动识别，准确度有限，请对照原谱。\n"
+            engine_info = folder / "_omr_engine.json"
+            if not is_midi and engine_info.is_file():
+                try:
+                    if json.loads(engine_info.read_text(encoding="utf-8")).get("engine") == "copista-28m":
+                        note += "# 图像识谱模型：Copista 28m；MusicXML 保留模型识别的记谱结构。\n"
+                except (OSError, ValueError):
+                    pass
             if not is_midi and count_staves(xml_path) > 2:
                 note += "# 注意：这份谱每行超过两行五线谱（多半是人声 + 钢琴），这类谱容易认错位，结果可能偏差较大。\n"
+            if not is_midi:
+                from app.omr_quality import quality_messages
+                from app.omr_repeats import has_unclosed_repeat_warning
+                from app.omr_tempo import has_tempo_mark
+
+                for message in quality_messages(folder):
+                    note += f"# 注意：{message}\n"
+                if has_unclosed_repeat_warning(xml_path):
+                    note += "# 注意：有反复起点但没有找到对应终点，可能是片段或识别遗漏；未闭合的段落只演奏一次。\n"
+                if not has_tempo_mark(xml_path):
+                    note += "# 注意：未识别到速度标记，♩=120 是默认值，请对照原谱。\n"
         text = _with_note(text, note)
         fingertip = fingertip_section_from_score_file(result_path, range_strategy)
         text = text.rstrip() + "\n\n" + fingertip

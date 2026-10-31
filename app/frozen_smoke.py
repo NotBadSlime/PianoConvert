@@ -15,6 +15,7 @@ REQUIRED_IMPORTS = (
     ("basic_pitch", "basic_pitch"),
     ("onnxruntime", "onnxruntime"),
     ("torch", "torch"),
+    ("torchvision", "torchvision"),
     ("homr", "homr"),
     ("musicxml", "musicxml"),
     ("transkun", "transkun"),
@@ -46,6 +47,45 @@ def _check_transkun() -> str:
     return ""
 
 
+def _check_shipped_homr_models() -> list[str]:
+    """A packaged app must carry homr's models, so reading scans never has to download them.
+
+    Only checked when frozen: from source they may live in the per-user cache instead."""
+    import sys
+
+    if not getattr(sys, "frozen", False):
+        return []
+    try:
+        from app import homr_models
+
+        missing = homr_models.missing_shipped()
+    except Exception as exc:  # noqa: BLE001
+        return [f"homr models: {exc}"]
+    return [f"homr models: not shipped: {', '.join(missing)}"] if missing else []
+
+
+def _check_copista() -> list[str]:
+    import sys
+
+    try:
+        from app import copista_models
+        from app.copista_runtime import activate, load_models
+
+        activate()
+        from copisteria import read, pipeline  # noqa: F401
+        from torchvision.ops import batched_nms  # noqa: F401
+
+        if getattr(sys, "frozen", False):
+            missing = copista_models.missing_shipped()
+            if missing:
+                return ["Copista models: not shipped: " + ", ".join(missing)]
+            model, _device = load_models("cpu")
+            del model
+    except Exception as exc:  # noqa: BLE001
+        return [f"Copista: {exc}"]
+    return []
+
+
 def check_imports() -> list[str]:
     errors: list[str] = []
     for label, modname in REQUIRED_IMPORTS:
@@ -75,6 +115,8 @@ def check_imports() -> list[str]:
         from app import jianpu, pdf_omr, pdf_vector  # noqa: F401
     except Exception as exc:  # noqa: BLE001
         errors.append(f"score recognition: {exc}")
+    errors.extend(_check_shipped_homr_models())
+    errors.extend(_check_copista())
     try:
         import pkg_resources
         pkg_resources.resource_filename("resampy.filters", "data/kaiser_fast.npz")

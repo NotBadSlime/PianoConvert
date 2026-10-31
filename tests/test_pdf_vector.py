@@ -109,6 +109,18 @@ def test_endings_without_repeat_signs_are_ignored():
     assert _order(_bars("", "?", "", "")) == [0, 1, 2, 3]
 
 
+def test_a_repeat_to_the_start_skips_the_pickup_bar_that_the_short_first_ending_leads_into():
+    # Für Elise: pickup bar (half a bar), 3 bars, a short 1st ending closing the repeat
+    bars = _bars("", "", "", "", "1]", "2", "")
+    bars[0].length = 2.0
+    bars[4].length = 2.0
+    assert _order(bars) == [0, 1, 2, 3, 4, 1, 2, 3, 5, 6]
+
+
+def test_a_repeat_to_the_start_keeps_a_full_first_bar():
+    assert _order(_bars("", "", "]", "")) == [0, 1, 2, 0, 1, 2, 3]
+
+
 def test_non_vector_pdf_is_not_read_as_vector(tmp_path):
     from PIL import Image
 

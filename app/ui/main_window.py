@@ -191,6 +191,23 @@ def _format_elapsed(seconds: float) -> str:
     return f"{seconds // 60} 分 {seconds % 60:02d} 秒"
 
 
+def _pdf_note_text() -> str:
+    """The PDF / 图片 note; it mentions the model download only while the models are missing
+    (the installer ships them, a source checkout may not have them yet)."""
+    try:
+        from app import copista_models
+
+        needs_download = bool(copista_models.missing())
+    except Exception:  # noqa: BLE001  (recognition reports missing components itself)
+        needs_download = False
+    download = "第一次看图识别需要联网下载 Copista 模型（约 124 MB）。" if needs_download else ""
+    return (
+        "打谱软件导出的 PDF 五线谱优先直接读取谱面上的音符。"
+        f"扫描件、拍照和截图使用 Copista 28m 看图识别，准确度有限，请对照原谱。{download}"
+        "支持印刷五线谱和双手简谱（自动判断），不认吉他谱、手写谱。"
+    )
+
+
 def default_engines():
     from app.engines.basic_pitch import BasicPitchEngine
     from app.engines.piano import PianoEngine
@@ -793,11 +810,7 @@ class MainWindow(QMainWindow):
         body_layout.setSpacing(10)
         body_layout.addWidget(self._build_settings())
 
-        self.pdf_note = QLabel(
-            "打谱软件导出的 PDF 五线谱会直接读取谱面上的音符，基本不会认错。"
-            "扫描件、拍照和截图只能看图识别，准确度有限，请对照原谱；第一次看图识别需要联网下载识别模型。"
-            "支持印刷五线谱和双手简谱（自动判断），不认吉他谱、手写谱。"
-        )
+        self.pdf_note = QLabel(_pdf_note_text())
         self.pdf_note.setObjectName("note")
         self.pdf_note.setWordWrap(True)
         self.pdf_box = QFrame()

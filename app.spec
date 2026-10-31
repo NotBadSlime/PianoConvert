@@ -1,5 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 import importlib
+import sys
 from pathlib import Path
 
 import music21
@@ -7,6 +8,31 @@ from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 root = Path(SPECPATH)
 music21_dir = Path(music21.__file__).resolve().parent
+sys.path.insert(0, str(root))
+
+# homr's models (CPU set, ~150 MB) ship beside its modules, where homr looks first, so reading
+# scans and screenshots needs no download. `python -m app.homr_models` puts them there.
+from app.homr_models import missing_shipped, required_names  # noqa: E402
+from app import copista_models  # noqa: E402
+
+if copista_models.missing_shipped():
+    raise SystemExit("Copista weights missing; run `python -m app.copista_models --package` first")
+
+HOMR_MODELS = set(required_names())
+_missing_homr_models = missing_shipped()
+if _missing_homr_models:
+    raise SystemExit(
+        "homr models are not beside the homr package; run `python -m app.homr_models` first. Missing: "
+        + ", ".join(_missing_homr_models)
+    )
+
+
+def _keep_homr_data(src: str) -> bool:
+    """Only the models the app loads: no fp16 copies, no half-finished downloads."""
+    name = Path(src).name
+    if name.endswith((".zip", ".part", ".tmp")):
+        return False
+    return not name.endswith(".onnx") or name in HOMR_MODELS
 
 # music21 is shipped as source (datas) and excluded from Analysis, so PyInstaller
 # never sees its imports. Bundle declared runtime deps explicitly.
@@ -57,6 +83,9 @@ hiddenimports = [
     "app.device",
     "app.frozen_smoke",
     "app.history",
+    "app.homr_models",
+    "app.copista_models",
+    "app.copista_runtime",
     "app.jianpu",
     "app.keyboard_score",
     "app.paths",
@@ -96,6 +125,10 @@ hiddenimports = [
     "cv2",
     "pypdfium2",
     "rapidocr",
+    "torchvision",
+    "torchvision.ops",
+    "scipy.ndimage",
+    "scipy.optimize",
 ]
 hiddenimports += MUSIC21_RUNTIME_PACKAGES
 
@@ -115,6 +148,16 @@ datas.append((str(root / "scripts" / "install_gpu.ps1"), "scripts"))
 datas.append((str(root / "app" / "gpu_worker.py"), "app"))
 # the GPU worker imports this file from beside itself
 datas.append((str(root / "app" / "transkun_infer.py"), "app"))
+
+# Copisteria is a pinned, unmodified source snapshot, including its taxonomy,
+# runtime JSON assets, license and NOTICE. No verify/ folder is needed at runtime.
+_vendor = root / "third_party" / "copisteria"
+for _file in _vendor.rglob("*"):
+    if _file.is_file() and "__pycache__" not in _file.parts and _file.suffix != ".pyc":
+        datas.append((str(_file), str(_file.parent.relative_to(root))))
+for _name in copista_models.FILES:
+    _file = copista_models.shipped_dir() / _name
+    datas.append((str(_file), str(Path("copista-models") / Path(_name).parent)))
 datas.append((str(root / "piano_transcription_inference"), "piano_transcription_inference_src"))
 # TransKun is shipped as plain source, not compiled into the exe (it is excluded from Analysis below):
 # its CRF uses torch.jit.script, which reads the .py files at run time. The same folder holds the weights
@@ -130,6 +173,8 @@ for _pkg in ("homr", "musicxml", "rapidocr", "pypdfium2"):
         pkg_datas, pkg_binaries, pkg_hidden = collect_all(_pkg)
     except Exception:
         continue
+    if _pkg == "homr":
+        pkg_datas = [item for item in pkg_datas if _keep_homr_data(item[0])]
     datas += pkg_datas
     binaries += pkg_binaries
     hiddenimports += pkg_hidden
@@ -172,7 +217,7 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    [],
+    [("X utf8", None, "OPTION")],
     exclude_binaries=True,
     name="PianoConvert",
     icon=str(root / "assets" / "PianoConvert.ico"),

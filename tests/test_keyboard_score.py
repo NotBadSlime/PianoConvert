@@ -463,3 +463,86 @@ def test_chord_setting_changes_what_counts_as_together():
     loose = keyboard_text(notes, "c", strict=False, style=STYLE_SIMPLE, chord="loose")
     assert "(DG)" in loose
     assert "(DG)" not in standard and "DG" in standard
+
+def test_a_triplet_beat_gets_cells_of_its_own():
+    # 16ths, then one beat of eighth-note triplets, then 16ths again
+    notes = [note(60 + i % 3, i * 0.25, i * 0.25 + 0.2) for i in range(8)]
+    notes += [note(64, 2 + i / 3, 2 + i / 3 + 0.3) for i in range(3)]
+    notes += [note(65, 3 + i * 0.25, 3 + i * 0.25 + 0.2) for i in range(4)]
+    text = keyboard_text(notes, "triplet")
+    assert "每拍 4 格" in text
+    assert "〈3〉" in text and "〈3〉这类记号" in text
+    onsets = sorted({round(q, 4) for q, _keys in parse_keyboard_text(text)})
+    assert [2.0, 2.3333, 2.6667] == [q for q in onsets if 2 <= q < 3]
+    assert [3.0, 3.25, 3.5, 3.75] == [q for q in onsets if q >= 3]
+
+
+def test_a_quintuplet_beat_and_the_beats_after_it_keep_their_times():
+    notes = [note(60, i * 0.5, i * 0.5 + 0.4) for i in range(2)]
+    notes += [note(62 + i % 2, 1 + i / 5, 1 + i / 5 + 0.15) for i in range(5)]
+    notes += [note(67, 2, 4)]
+    text = keyboard_text(notes, "quint")
+    assert "〈5〉" in text
+    onsets = sorted({round(q, 4) for q, _keys in parse_keyboard_text(text)})
+    assert onsets == [0.0, 0.5, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0]
+
+
+def test_a_lone_ornament_does_not_split_its_beat():
+    # a single 32nd squeezed before a beat is written in its neighbour's cell, not as a split beat
+    notes = [note(60 + i % 3, i * 0.25, i * 0.25 + 0.2) for i in range(16)]
+    notes += [note(74, 3.875, 4.0), note(72, 4, 5)]
+    text = keyboard_text(notes, "orn")
+    assert "〈" not in text
+
+
+def test_the_musicxml_grid_includes_split_beats():
+    from app.convert import _grid_divisors
+
+    head = "# 1=C  4/4  ♩=90  每拍 4 格（一格 = 十六分音符）\n【键盘谱】\n 1 | ABCD 〈3〉ABC 〈5〉ABCDE ABCD |\n"
+    assert _grid_divisors(head) == (3, 4, 5)
+
+
+def test_exact_thirty_seconds_are_not_approximated_as_sextuplets():
+    # A mostly-16th score has one beat at 0, 3/8 and 7/8 quarters.
+    # Six cells look close, but move both offbeat notes by 1/24 quarter.
+    notes=[note(60,i*.25,i*.25+.2) for i in range(160) if not 20<i*.25<21]
+    notes += [note(62,20.375,20.6),note(67,20.875,21)]
+    text=keyboard_text(notes,'exact',style=STYLE_SIMPLE)
+    assert '每拍 4 格' in text
+    assert '〈8〉' in text
+    assert [q for q,_ in parse_keyboard_text(text) if 20<=q<21] == [20,20.375,20.875]
+
+
+def test_notated_grid_uses_the_closest_fallback_when_no_small_denominator_is_exact():
+    from app.keyboard_score import Beat,_split_tuplet_beats
+    import math
+
+    beat=Beat(0,1,4)
+    times=[0,.2,.37,.59,.86]
+    _split_tuplet_beats([[beat]],times,4,exact_timing=True)
+    snapped=[math.floor(q*beat.cells+.5)/beat.cells for q in times]
+    assert len(set(snapped)) == len(times)
+    assert max(abs(q-s) for q,s in zip(times,snapped)) < .03
+
+
+def test_unrepresentable_close_attacks_are_not_stretched_to_distant_cells():
+    from app.keyboard_score import Beat,_split_tuplet_beats
+    import math
+
+    beat=Beat(0,1,4)
+    times=[.123,.128]
+    _split_tuplet_beats([[beat]],times,4,exact_timing=True)
+    snapped=[math.floor(q*beat.cells+.5)/beat.cells for q in times]
+    assert max(abs(q-s) for q,s in zip(times,snapped)) <= 1/32
+
+
+def test_two_written_voices_keep_eighth_and_twelfth_subdivisions_in_one_beat():
+    from app.keyboard_score import Beat,_split_tuplet_beats
+    import math
+
+    beat=Beat(0,1,8)
+    times=sorted({i/8 for i in range(8)}|{i/12 for i in range(12)})
+    _split_tuplet_beats([[beat]],times,8,exact_timing=True)
+    snapped=[math.floor(q*beat.cells+.5)/beat.cells for q in times]
+    assert len(set(snapped)) == len(times)
+    assert max(abs(q-s) for q,s in zip(times,snapped)) < 1e-8

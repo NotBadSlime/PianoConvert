@@ -17,6 +17,16 @@ Windows 桌面程序 · 中文界面 · 本地运行
   <img src="docs/images/screenshot-dark.png" alt="深色主题" width="49%">
 </p>
 
+## 最近更新（2026-10-31，当前源码）
+
+- **图像识谱改用 Copista 28m**：扫描 PDF、截图和照片中的印刷五线谱默认使用 Copista，保留模型原生 MusicXML，再生成 MIDI 和键盘谱。可解析的矢量 PDF 和双手简谱继续使用各自的读取路线。
+- **加强节奏与谱面读取**：补充轮廓字形 PDF 支持，改进弱起、不完整拍、附点、三连音和复杂连音组、跨谱表及加线音符处理；长 PDF 按全部页面读取，避免静默截断。
+- **修复临时升降与转调作用范围**：区分谱表、音高和八度，正确处理还原、重升重降、延音跨小节及调号变化；键盘谱按对应调号段落适配诗琴音域，局部临时记号不会触发整首移调。
+- **统一演奏顺序与变拍变速**：MIDI 和键盘谱共用 MusicXML 反复展开顺序，反复跳回与一二房子恢复实际进入该段的速度、拍号和调号；保留已识别的小节内变速位置与非整数速度。
+- **补齐模型管理、诊断和打包**：固定 Copista 源码与权重版本，加载前校验 SHA-256，支持模型下载续传和识别取消；保留逐页原始 XML、版本和结构审计，缺页或乐器分组不一致时明确报错。修复 torchvision 原生算子打包，新增节奏回归工具和测试。
+
+本地回归共运行 516 项用例：首次 504 项通过，其余 12 项在更新模型提示断言、调整代理环境或单独复验后全部通过。源码与打包后的 EXE 均完成《无名的人》4 页转换，读到 **♩=67**，MIDI 约 **4 分 31 秒**，两者 MIDI 字节一致；EXE 还通过空用户模型缓存、禁网条件下的转换。以上未包含逐音人工校订或听奏验收，也不代表任意来源谱面都能达到同样效果。
+
 ## 功能
 
 - **四种来源都能转**
@@ -36,7 +46,7 @@ Windows 桌面程序 · 中文界面 · 本地运行
 2. 运行安装包，按提示完成安装。
 3. 从开始菜单或桌面打开 **PianoConvert**。
 
-系统要求：64 位 Windows 10 / 11。转歌曲、MIDI、MusicXML 和打谱软件导出的 PDF 都不用联网；第一次用图像识别读扫描件或截图时，需要联网下载识别模型。
+系统要求：64 位 Windows 10 / 11。转换都在本地完成，不用联网；看图识别用的模型已经包含在安装包里。只有可选的 GPU 组件需要联网下载。
 
 ## 快速上手
 
@@ -62,7 +72,8 @@ Windows 桌面程序 · 中文界面 · 本地运行
 |---|---|
 | `Z X C V B N M` / `A S D F G H J` / `Q W E R T Y U` | 低音 / 中音 / 高音的 1–7（诗琴的三排键） |
 | `\|` | 小节线；每行开头的数字是小节号 |
-| 空格 | 分开每一拍；一拍里的格子紧挨着写，每拍格数整首不变 |
+| 空格 | 分开每一拍；一拍里的格子紧挨着写，每拍格数整首不变（`〈3〉` 这样标出的拍除外） |
+| `〈3〉ABC` | 只有这一拍平均分成 3 格（三连音；`〈5〉` 五连音、`〈6〉` 六连音……） |
 | `(ADG)` | 一起按 |
 | `{ZCB}` | 琶音：从低到高依次快速按 |
 | `wE` | 倚音：先快速带一下 W，再按 E |
@@ -79,7 +90,7 @@ Windows 桌面程序 · 中文界面 · 本地运行
 | MIDI、MusicXML | 音符原样读取，按诗琴音域和键位排版 |
 | 打谱软件导出的 PDF | 直接读取谱面，反复记号和一二房子会展开，基本不会认错 |
 | 歌曲录音 | 钢琴独奏录音效果最好；人声、伴奏很重的歌会有杂音和漏音 |
-| 扫描件、照片、截图 | 图像识别，会有认错的地方，弹之前请对照原谱；不展开反复记号 |
+| 扫描件、照片、截图 | 默认由 Copista 28m 识别印刷五线谱，保留原生 MusicXML 并生成 MIDI；反复按识别出的标记处理，结果请对照原谱 |
 | 吉他谱、手写谱 | 不支持 |
 
 ## 常见问题
@@ -108,7 +119,7 @@ C 大调和 A 小调的曲子不会移调。别的调会整首移到 C 调白键
 改了键盘谱样式、音域处理或高级选项后，右侧正在预览的键盘谱会立刻按新设置重新排版，不用重新转换；软件也会记住你的选择。
 
 **谱头写着 ♩=90「只是默认值」？**
-这份 PDF 上没有印速度，软件用了默认的每分钟 90 拍，可以按自己的感觉调整快慢。
+这份 PDF 没有读到开头速度，矢量路线用了每分钟 90 拍的默认值。图像路线没有识别到速度时使用 120；默认值不代表识别成功，请对照谱面速度。图片识谱会额外尝试读取首页数字速度，中途变速仍需核对。
 
 **想要 MusicXML（比如导进 MuseScore 接着改）？**
 转换完成后点结果条里的 **转 MusicXML**，或者在「记录」里找到那一条，点同名按钮。软件用这次的 MIDI 生成，节奏按键盘谱的格子取整；歌曲录音转出来的 MIDI 本来就不规整，生成的 MusicXML 只能当草稿。生成好的文件留在这次的结果文件夹里。
@@ -118,6 +129,11 @@ C 大调和 A 小调的曲子不会移调。别的调会整首移到 C 调白键
 
 **PDF 没认出来？**
 先确认 PDF 里是印刷的五线谱或双手简谱。扫描件尽量清晰、端正，截图宽度最好在 1200 像素以上。
+
+**看图识别还要下载模型吗？**
+新构建的安装包携带 Copista 28m 的检测器和上下文模型（合计约 124 MB），可离线识别。从源码运行且模型缺失时，首次转换会从 Hugging Face 下载到 `%LOCALAPPDATA%\PianoConvert\copista-28m\`；支持取消和断点续传，加载前校验固定版本的 SHA-256。转换可用 CPU 运行；安装匹配 CUDA 版本的 PyTorch 与 torchvision 时自动使用 GPU。
+
+打谱软件导出的可解析 PDF 仍优先直接读取，双手简谱仍使用专用识别路线。图像五线谱的原始逐页 XML、模型版本和校验记录保存在输出目录 `_omr_raw`；不对 Copista 套用 HOMR 的连线改写规则，也不会把缺页结果当作整曲交付。尚未验证任意来源、手写谱或所有扫描质量。
 
 ## 从源码运行
 
@@ -132,6 +148,10 @@ py -3.10 -m venv .venv
 # 读取 PDF / 图片乐谱需要的组件
 .venv\Scripts\python -m pip install --ignore-requires-python --no-deps homr==0.7.0
 .venv\Scripts\python -m pip install musicxml==1.4 "opencv-python-headless>=4.10,<4.13" "pypdfium2>=4,<6" "rapidocr>=3.7,<4"
+# 默认看图识别模型：打包前准备；源码首次使用也可自动下载到用户缓存
+.venv\Scripts\python -m app.copista_models --package
+# 保留的 HOMR 兼容后端（不作为默认图像引擎；现有打包配置仍携带）
+.venv\Scripts\python -m app.homr_models
 
 # 钢琴转录模型 TransKun（权重随包自带；不装它为训练准备的依赖）
 .venv\Scripts\python -m pip install --no-deps transkun==2.0.1
@@ -149,10 +169,12 @@ py -3.10 -m venv .venv
 .venv\Scripts\python -m pytest -q
 ```
 
+图像识谱使用 [KobiMusic/copisteria](https://github.com/kobimusic/copisteria) 的 Copista 28m。固定的未修改源代码、版本记录及 Apache-2.0 `LICENSE`、`NOTICE` 位于 `third_party/copisteria/`；本项目适配层在 Python 3.10 上验证推理兼容性，上游声明的安装环境为 Python 3.12 及以上。
+
 打包：
 
 ```powershell
-.\scripts\build_exe.ps1                       # PyInstaller，输出到 dist\
+.\scripts\build_exe.ps1                       # PyInstaller，输出到 dist\（会先下载看图识别模型，一起打进去）
 .\scripts\build_installer.ps1 -Version 1.0.0  # Inno Setup 6 安装包，输出到 installer\output\
 ```
 
@@ -186,7 +208,8 @@ PianoConvert 使用了这些开源项目（版权和许可证归各自作者所�
 | [TransKun](https://github.com/Yujia-Yan/Transkun) | 钢琴录音转录（默认） | MIT |
 | [piano_transcription_inference](https://github.com/qiuqiangkong/piano_transcription_inference) | 钢琴录音转录（ByteDance 模型，可选） | 见原项目 |
 | [Basic Pitch](https://github.com/spotify/basic-pitch) | 其他乐器录音转录 | Apache-2.0 |
-| [homr](https://github.com/liebharc/homr) | 扫描件、图片五线谱识别 | AGPL-3.0 |
+| [KobiMusic/copisteria — Copista 28m](https://github.com/kobimusic/copisteria) | 印刷五线谱图像识别（默认） | Apache-2.0 |
+| [homr](https://github.com/liebharc/homr) | 保留的图像识谱兼容后端 | AGPL-3.0 |
 | [RapidOCR](https://github.com/RapidAI/RapidOCR) | 简谱识别中的文字识别 | Apache-2.0 |
 | [music21](https://github.com/cuthbertLab/music21) | MusicXML 读写 | BSD-3-Clause |
 | [pretty_midi](https://github.com/craffel/pretty-midi)、[mido](https://github.com/mido/mido) | MIDI 读写 | MIT |

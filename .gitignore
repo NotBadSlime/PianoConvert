@@ -7,6 +7,8 @@ dist/
 installer/output/
 Output/
 models/*.pth
+models/copista-28m/**/*.pt
+models/copista-28m/**/*.part
 
 # local evaluation data, reports and notes (never published)
 .eval/

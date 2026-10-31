@@ -303,6 +303,60 @@ def _smufl_object_chars(page, tp) -> list[tuple]:
     return out
 
 
+def _outline_drawing(page, width: float, height: float) -> PageDrawing | None:
+    """A page without text whose symbols are all outlines (see app.pdf_outline), read like a
+    MuseScore page: the recognised shapes are its SMuFL glyphs, the remaining filled shapes
+    its stems, beams, barlines and slurs, the strokes its staff and ledger lines."""
+    try:
+        from app.pdf_outline import outline_page
+    except Exception:  # noqa: BLE001
+        return None
+    found = outline_page(page)
+    if found is None:
+        return None
+    chars, left, paths, space = found
+    if sum(1 for c in chars if c[0] in SMUFL_HEADS) < 4:
+        return None
+    # everything is brought to the reader's scale (a staff space of 5) here: these pages are
+    # drawn at any scale, and their line widths with them
+    k = 5.0 / space
+    chars = [(c[0], c[1] * k, c[2] * k, c[3] * k, c[4] * k, c[5] * k, c[6] * k, c[7] * k) + tuple(c[8:]) for c in chars]
+    paths = [([(kind, x * k, y * k) for kind, x, y in pts], fill, stroke, w * k, scale) for pts, fill, stroke, w, scale in paths]
+    left = [([[(x * k, y * k) for x, y in c] for c in cs], tuple(v * k for v in box)) for cs, box in left]
+    width, height = width * k, height * k
+    # text sizes: MuseScore pages report them before the page scale; here they are drawn
+    # sizes, which _smufl_glyphs scales like the other SMuFL pages' text
+    glyphs, lines = _smufl_glyphs(chars)
+    curves: list[Curve] = []
+    for pts, fill, stroke, w, scale in paths:
+        if fill and not (stroke and len(pts) == 2):
+            continue
+        # strokes (a two-point line drawn with fill set too is still a stroked line)
+        _smufl_shape(pts, False, True, w * scale, lines, curves)
+    for cs, box in left:
+        # one filled shape: its outline as the path _smufl_shape reads
+        outline = [(float(x), float(y)) for x, y in cs[0]]
+        bw, bh = box[2] - box[0], box[3] - box[1]
+        # a tie between two close notes can be little wider than a notehead (staff space 5)
+        bezier = len(outline) > 12 and bw > 4 and bh < 0.4 * bw
+        if bezier:
+            # a slur or tie: a thin crescent; its tips are the leftmost and rightmost points
+            a = min(outline, key=lambda p: p[0])
+            b = max(outline, key=lambda p: p[0])
+            curves.append(Curve(a[0], a[1], b[0], b[1]))
+            continue
+        # stems, barlines and beams are plain quadrilaterals; anything else left over is text
+        # drawn as outlines (lyrics, chord names, titles) and must not pass for a beam
+        if len(cs) > 1 or len(outline) > 6:
+            continue
+        if bh <= 2.5 * bw and bw < 4.0:
+            continue  # too short for a beam
+        pts = [(0, x, y) for x, y in outline]
+        _smufl_shape(pts, True, False, 0.0, lines, curves)
+    lines = _join_staff_segments(lines)
+    return _normalized(PageDrawing(glyphs, lines, curves, width, height, True))
+
+
 def read_drawing(page) -> PageDrawing:
     import pypdfium2.raw as raw
 
@@ -318,6 +372,12 @@ def read_drawing(page) -> PageDrawing:
         raw.FPDFText_GetCharOrigin(tp.raw, i, ctypes.byref(ox), ctypes.byref(oy))
         chars.append((ord(ch[0]), ox.value, oy.value, l, b, r, t, raw.FPDFText_GetFontSize(tp.raw, i), _font_name(tp, i), ch))
     smufl = any(_is_smufl(c[8]) for c in chars) and not any(MUSIC_FONT in c[8] for c in chars)
+    if not chars:
+        outlined = _outline_drawing(page, width, height)
+        if outlined is not None:
+            if page_close := getattr(tp, "close", None):
+                page_close()
+            return outlined
     if smufl:
         music = _smufl_object_chars(page, tp)
         # the text page reports font sizes before the page's scaling; measure that scaling
@@ -368,8 +428,62 @@ def read_drawing(page) -> PageDrawing:
         page_close()
     if smufl:
         lines = _join_staff_segments(lines)
-    return PageDrawing(glyphs, lines, curves, width, height, smufl)
+    return _normalized(PageDrawing(glyphs, lines, curves, width, height, smufl))
 
+
+def _page_staff_gap(lines: list[Line]) -> float | None:
+    """The distance between the lines of the staves of a page, when staves are on it:
+    five long horizontal lines evenly spaced (the commonest such distance)."""
+    long_lines = [ln for ln in lines if ln.horizontal and ln.width <= 1.6 and (ln.xmax - ln.xmin) >= 25]
+    by_extent: dict[tuple[int, int], list[float]] = defaultdict(list)
+    for ln in long_lines:
+        by_extent[(int(round(ln.xmin)), int(round(ln.xmax)))].append(ln.y0)
+    votes: Counter = Counter()
+    for ys in by_extent.values():
+        ys = sorted(set(round(y, 1) for y in ys), reverse=True)
+        for i in range(len(ys) - 4):
+            group = ys[i : i + 5]
+            gaps = [group[k] - group[k + 1] for k in range(4)]
+            mean = sum(gaps) / 4
+            if mean >= 0.3 and max(gaps) - min(gaps) <= 0.12 * mean + 0.1:
+                votes[round(mean, 2)] += 1
+    if not votes:
+        return None
+    return votes.most_common(1)[0][0]
+
+
+def _normalized(drawing: PageDrawing) -> PageDrawing:
+    """A page printed smaller (or larger) than usual - a generator that shrinks a crowded page
+    to fit it on the sheet - is scaled so that a staff space is 5 again, which is what every
+    size in the reader assumes. Pages that are as usual are returned as they are."""
+    gap = _page_staff_gap(drawing.lines)
+    if gap is None or 4.0 <= gap <= 7.0 or not (0.3 <= gap < 4.0 or 7.0 < gap <= 40.0):
+        return drawing
+    k = 5.0 / gap
+    for g in drawing.glyphs:
+        g.x *= k
+        g.y *= k
+        g.l *= k
+        g.b *= k
+        g.r *= k
+        g.t *= k
+        if drawing.smufl:
+            g.size *= k  # sizes of a MuseScore page follow its scaling; the others' are the font's own
+    for ln in drawing.lines:
+        ln.x0 *= k
+        ln.y0 *= k
+        ln.x1 *= k
+        ln.y1 *= k
+        if drawing.smufl:
+            ln.width *= k  # widths of a MuseScore page are in page units; the others' are not scaled
+    for cv in drawing.curves:
+        cv.x0 *= k
+        cv.y0 *= k
+        cv.x1 *= k
+        cv.y1 *= k
+    drawing.width *= k
+    drawing.height *= k
+    return drawing
 
 def _join_staff_segments(lines: list[Line]) -> list[Line]:
     """MuseScore draws staff lines bar by bar; join pieces that continue each other."""
@@ -513,6 +627,56 @@ class Head:
 
 
 @dataclass
+class Tuplet:
+    """Notes and rests under one tuplet number. ``ratio`` is how much of its written length
+    each member lasts (2/3 for a triplet); a group that does not add up to anything sensible
+    with the usual ratio can be re-read with another one (see ``TUPLET_RATIOS``)."""
+    n: int
+    ratio: float
+    default: float = 0.0
+
+    def __post_init__(self) -> None:
+        self.default = self.default or self.ratio
+
+
+# tuplet ratios tried, after the usual one, for a group that makes its bar too long or short
+TUPLET_RATIOS = (2 / 3, 4 / 5, 4 / 7, 8 / 9, 4 / 6, 3 / 4, 6 / 7, 1.0)
+
+
+def _tuplet_numbers(glyphs: list[Glyph]) -> list[Glyph]:
+    """Join neighbouring digits before interpreting a tuplet label (13 is not 3)."""
+    digits = [g for g in glyphs if not g.music and g.text.isascii() and g.text.isdecimal()
+              and 13 <= g.size <= 17.5]
+    used: set[int] = set()
+    order={id(g):i for i,g in enumerate(glyphs)}
+    result = []
+    for first in sorted(digits,key=lambda g:(g.l,-g.y)):
+        if id(first) in used:
+            continue
+        run = [first]
+        used.add(id(first))
+        while True:
+            last = run[-1]
+            following = [g for g in digits if id(g) not in used and abs(g.y-first.y)<1
+                         and abs(g.size-first.size)<.5 and -.2 <= g.l-last.r <= max(1,.15*first.size)]
+            if not following:
+                break
+            following.sort(key=lambda g:g.l)
+            run.append(following[0])
+            used.add(id(following[0]))
+        if len(run)==1:
+            result.append((order[id(first)],first))
+        else:
+            result.append((min(order[id(g)] for g in run),
+                           Glyph(-1,first.x,first.y,min(g.l for g in run),min(g.b for g in run),
+                                 max(g.r for g in run),max(g.t for g in run),first.size,False,
+                                 ''.join(g.text for g in run))))
+    # Preserve the engraver's order for independent labels. Reordering them
+    # changes which of two nearby tuplet groups claims an overlapping beam.
+    return [g for _,g in sorted(result,key=lambda item:item[0])]
+
+
+@dataclass
 class Stem:
     line: Line
     up: bool
@@ -520,6 +684,8 @@ class Stem:
     beams: int = 0
     flags: int = 0
     tuplet: float = 1.0
+    group: "Tuplet | None" = None
+    beam_group: int = 0  # stems joined by beams share it (0: not beamed)
 
 
 @dataclass
@@ -535,6 +701,15 @@ class Event:
     trem_second: bool = False            # the second note of a two-note tremolo
     repeat_sub: float = 0.0              # tremolo: repeat (or alternate) every this many quarters
     y: float = 0.0                       # height (rest centre / mean notehead)
+    base: float = 0.0                    # written length, before any tuplet ratio
+    group: "Tuplet | None" = None        # the tuplet this event belongs to
+    beam_group: int = 0                  # events whose stems are joined by beams share it
+    key_signature: dict[int, int] | None = None  # signature at this event, excluding local accidentals
+
+    def set_ratio(self) -> None:
+        """Length from the written length and the tuplet ratio."""
+        if self.group is not None and self.base:
+            self.length = self.base * self.group.ratio
 
 
 def _nearest_staff(staves: list[Staff], y: float) -> Staff:
@@ -562,16 +737,25 @@ def _staff_by_ledgers(system: list[Staff], head: "Glyph", ledgers: list[Line], n
         return nearest
     cands = [min(lower, key=lambda st: y - st.top), min(upper, key=lambda st: st.bottom - y)]
     cx = head.x + 3
+    nearest_ledger_y = nearest.top + nearest.space if y > nearest.top else nearest.bottom - nearest.space
+    nearest_has_ledger = any(abs(ln.y0-nearest_ledger_y) <= .7 and ln.xmin-1 <= cx <= ln.xmax+1
+                             for ln in ledgers)
 
-    def score(st: Staff) -> float:
+    def score(st: Staff) -> tuple[float, int]:
         sp = st.space
         dist = (y - st.top) if y > st.top else (st.bottom - y)
         if dist < 1.25 * sp:
-            return 1.0  # right next to the staff: no ledger line needed
+            return 1.0, 0  # right next to the staff: no ledger line needed
         n = int(dist / sp + 0.3)
         ys = [st.top + sp * k for k in range(1, n + 1)] if y > st.top else [st.bottom - sp * k for k in range(1, n + 1)]
         found = sum(1 for ly in ys if any(abs(ln.y0 - ly) <= 0.7 and ln.xmin - 1 <= cx <= ln.xmax + 1 for ln in ledgers))
-        return found / len(ys)
+        # A complete chain growing out of the farther staff is positive
+        # evidence. Merely being in the space beside the nearer staff is not:
+        # both used to score 1, so a high bass note could be read in treble.
+        # If both staves have supporting ledgers (e.g. overlapping chords),
+        # their chain lengths cannot decide which chord this head belongs to.
+        evidence = found if found == len(ys) and found >= 2 and not nearest_has_ledger else 0
+        return found / len(ys), evidence
 
     return max(cands, key=lambda st: (score(st), st is nearest))
 
@@ -603,12 +787,16 @@ class Bar:
     start_q: float = 0.0  # onset in the played-out score (first pass)
     volta_open: bool = False  # its ending bracket runs on past the end of the line
     tempo: float = 0.0  # a metronome mark printed over this bar
+    totals: list = field(default_factory=list)  # (staff index, length of what it holds), once laid out
+    keys: list = field(default_factory=list)  # key signature each staff's notes were read in (letter -> alter)
+    tempo_positions: list[tuple[float, float]] = field(default_factory=list)  # printed (x, quarter BPM), before timing is laid out
 
 @dataclass
 class StaffState:
     clef: int = CLEF_TREBLE
     key: dict[int, int] = field(default_factory=dict)  # step 0..6 -> alter
     pending_ties: set[int] = field(default_factory=set)  # pitches tied over the line end
+    last_alter: dict[int, int] = field(default_factory=dict)  # diatonic step -> alter of its last note
 
 
 @dataclass
@@ -660,9 +848,10 @@ def _barlines(drawing: PageDrawing, system: list[Staff]) -> list[Barline]:
     heads = [g for g in drawing.glyphs if g.music and g.code in HEADS]
 
     def is_stem(ln: Line) -> bool:
-        # a stem always has a notehead at one of its ends
+        # a stem always has a notehead at one of its ends (a down stem of a chord starts a
+        # little left of, and reaches a little past, its lowest head)
         for h in heads:
-            if -1.5 <= ln.x0 - h.x <= 8.0 and (abs(h.y - ln.ymin) <= 3.0 or abs(h.y - ln.ymax) <= 3.0):
+            if -4.5 <= ln.x0 - h.x <= 8.0 and (abs(h.y - ln.ymin) <= 4.5 or abs(h.y - ln.ymax) <= 4.5):
                 return True
         return False
 
@@ -724,6 +913,8 @@ def _voltas(drawing: PageDrawing, system: list[Staff], barlines: list[Barline]) 
     hooks = [ln for ln in drawing.lines if ln.vertical and ln.width <= 1.6 and 0.8 * space <= ln.ymax - ln.ymin <= 5 * space]
     texts = [g for g in drawing.glyphs if not g.music and top.top < g.y < top.top + 14 * space]
     ottavas = [g for g in drawing.glyphs if g.music and g.code in OTTAVA]
+    # staff lines of the system above, when systems stand close together, are not brackets
+    staff_line_ys = [y for ln in drawing.lines if ln.horizontal and ln.xmax - ln.xmin > 0.6 * (top.x1 - top.x0) for y in (ln.y0,)]
     out: list[tuple[float, float, int, bool]] = []
     for ln in drawing.lines:
         if not ln.horizontal or ln.width > 1.6 or ln.xmax - ln.xmin < 4 * space:
@@ -731,6 +922,9 @@ def _voltas(drawing: PageDrawing, system: list[Staff], barlines: list[Barline]) 
         height = ln.y0 - top.top
         if not (1.2 * space <= height <= 14 * space) or not (top.x0 - 2 <= ln.xmin <= top.x1):
             continue
+        if ln.xmax - ln.xmin > 0.6 * (top.x1 - top.x0) and sum(1 for y in staff_line_ys if 0.5 * space <= abs(y - ln.y0) <= 1.5 * space) >= 1 \
+                and sum(1 for y in staff_line_ys if abs(abs(y - ln.y0) - space) <= 0.3 or abs(abs(y - ln.y0) - 2 * space) <= 0.3) >= 2:
+            continue  # a line of a staff (staff lines evenly one space apart next to it)
         hooked = any(abs(v.x0 - ln.xmin) <= 1.0 and abs(v.ymax - ln.y0) <= 1.0 for v in hooks)
         right_hooked = any(abs(v.x0 - ln.xmax) <= 1.0 and abs(v.ymax - ln.y0) <= 1.0 for v in hooks)
         # it starts at a barline, or (first bar of a line) after the clef and key signature
@@ -800,6 +994,208 @@ def _mark_cue_notes(heads, barlines, rest_glyphs, staff_of, head_w: float) -> No
             h.grace = False
 
 
+# the order in which a key signature adds its flats / sharps (diatonic letter, C = 0)
+KEY_ORDER = {-1: (6, 2, 5, 1, 4, 0, 3), 1: (3, 0, 4, 1, 5, 2, 6)}
+
+
+def _assign_curves(curves: list[list[tuple[float, tuple, tuple]]]) -> list[tuple]:
+    """Give each curve one of its options so that no two curves take the same resource
+    (a notehead's one tie out, one tie in), as many curves as possible get one, and the
+    options chosen are the nearest ones. ``curves[i]`` lists (cost, resources, payload);
+    returns the payloads chosen.
+
+    Curves that share no resource do not influence each other, so the search runs on the small
+    groups of curves that do (the ties of one chord)."""
+    parent = list(range(len(curves)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    owner: dict = {}
+    for i, options in enumerate(curves):
+        for _cost, resources, _payload in options:
+            for key in resources:
+                if key in owner:
+                    parent[find(i)] = find(owner[key])
+                else:
+                    owner[key] = i
+    groups: dict[int, list[int]] = defaultdict(list)
+    for i in range(len(curves)):
+        groups[find(i)].append(i)
+
+    chosen: list[tuple] = []
+    for members in groups.values():
+        if len(members) == 1:
+            chosen.append(min(curves[members[0]], key=lambda o: o[0])[2])
+            continue
+        order = sorted(members, key=lambda i: len(curves[i]))
+        if len(order) <= 9:
+            best: list = [-1, 0.0, {}]
+
+            def search(k: int, used: frozenset, count: int, cost: float, picks: dict) -> None:
+                if count + (len(order) - k) < best[0]:
+                    return
+                if k == len(order):
+                    if count > best[0] or (count == best[0] and cost < best[1] - 1e-9):
+                        best[0], best[1], best[2] = count, cost, dict(picks)
+                    return
+                i = order[k]
+                for ci, (c, resources, _payload) in sorted(enumerate(curves[i]), key=lambda t: t[1][0]):
+                    if any(r in used for r in resources):
+                        continue
+                    picks[i] = ci
+                    search(k + 1, used | frozenset(resources), count + 1, cost + c, picks)
+                    del picks[i]
+                search(k + 1, used, count, cost, picks)
+
+            search(0, frozenset(), 0, 0.0, {})
+            chosen.extend(curves[i][ci][2] for i, ci in best[2].items())
+        else:  # a huge cluster: nearest options first
+            used = set()
+            done: set[int] = set()
+            for c, resources, payload, i in sorted(
+                ((c, r, p, i) for i in members for c, r, p in curves[i]), key=lambda t: t[0]
+            ):
+                if i in done or any(r in used for r in resources):
+                    continue
+                done.add(i)
+                used.update(resources)
+                chosen.append(payload)
+    return chosen
+
+
+def _line_start_key_glyphs(
+    system: list[Staff],
+    accidental_glyphs: list[Glyph],
+    heads: list[Head],
+    music: list[Glyph],
+    staff_of: dict[int, Staff],
+    clef_changes: dict[int, list[tuple[float, int]]],
+    state: "ReaderState",
+) -> set[int]:
+    """The accidentals of the key signature at the start of a line, by id.
+
+    A line repeats the key signature in force. A first note can stand level with, and close
+    behind, the last accidental of that key signature; looking only at what is next to a
+    notehead would take the accidental for the note's own and leave the line with a shorter
+    key. So the accidentals in front of the first note or rest of a staff that spell out the
+    key signature of the line before it (the same flats or sharps, in the order the circle of
+    fifths adds them) are the key signature. A line that changes the key is not covered; its
+    accidentals are told apart as before.
+    """
+    found: set[int] = set()
+    for st in system:
+        prior = {letter: alter for letter, alter in state.staff(st.index).key.items() if alter}
+        signs = set(prior.values())
+        if len(signs) != 1:
+            continue
+        sign = signs.pop()
+        if sign not in KEY_ORDER:  # a key has no double sharps / flats: the state holds a misread
+            continue
+        expected = KEY_ORDER[sign][: len(prior)]
+        if set(prior) != set(expected):
+            continue
+        firsts = [h.x for h in heads if h.staff is st] + [
+            g.x for g in music if g.code in RESTS and staff_of[id(g)] is st
+        ]
+        if not firsts:
+            continue
+        first_x = min(firsts)
+        cands = sorted(
+            (g for g in accidental_glyphs if staff_of[id(g)] is st and g.x < first_x - 0.5 and ACCIDENTALS[g.code] != 0),
+            key=lambda g: g.x,
+        )
+        if len(cands) < len(expected):
+            continue
+        clef_code = state.staff(st.index).clef
+        for cx, code in sorted(clef_changes.get(st.index, [])):
+            if cx <= cands[0].x:
+                clef_code = code
+        base = CLEFS[clef_code][0]
+        run = cands[: len(expected)]
+        spelled = [(base + st.step_of(g.y)) % 7 for g in run]
+        signs_ok = all((1 if ACCIDENTALS[g.code] > 0 else -1) == sign for g in run)
+        gaps_ok = all(0.5 <= b.x - a.x <= 9 for a, b in zip(run, run[1:]))
+        if spelled == list(expected) and signs_ok and gaps_ok:
+            found.update(id(g) for g in run)
+    return found
+
+
+def _key_change_glyphs(
+    system: list[Staff],
+    accidental_glyphs: list[Glyph],
+    heads: list[Head],
+    staff_of: dict[int, Staff],
+    clef_changes: dict[int, list[tuple[float, int]]],
+    state: "ReaderState",
+    starts: list[float],
+) -> dict[int, int]:
+    """The accidentals of a new key signature, by id, with the key (fifths: -4 = four flats):
+    one printed at the start of a line or right after a barline (``starts``), before the first
+    note there.
+
+    Its flats (or sharps) come in the order the circle of fifths adds them, evenly spaced.
+    The first note after it can stand close behind it, and then the last accidental looks
+    like that note's own. A change of key is printed on every staff of the system, so a
+    run counts only when every staff with notes there shows the same one (or, on a single
+    staff, when it has at least three accidentals); the accidentals of a chord are not
+    mistaken for a key."""
+    found: dict[int, int] = {}
+    for x0 in starts:
+        per_staff: dict[int, tuple[int, list[Glyph]]] = {}
+        staves_with_notes = 0
+        for st in system:
+            after = [h.x for h in heads if h.staff is st and h.x > x0]
+            if not after:
+                continue
+            staves_with_notes += 1
+            first_x = min(after)
+            cands = sorted(
+                (g for g in accidental_glyphs if staff_of[id(g)] is st and x0 < g.x < first_x - 0.5 and ACCIDENTALS[g.code] in (-1, 1)),
+                key=lambda g: g.x,
+            )
+            if len(cands) < 2 or cands[0].x - x0 > 40:
+                continue
+            # the clef the key is written in: the one in force, or one printed just before
+            # it (a clef change at a barline is drawn in front of the new key; some
+            # generators still place that key for the old clef)
+            clefs = {state.staff(st.index).clef}
+            for cx, code in sorted(clef_changes.get(st.index, [])):
+                if cx <= cands[-1].x + 2:
+                    clefs = {code} if cx <= cands[0].x - 30 else clefs | {code}
+            sign = ACCIDENTALS[cands[0].code]
+            order = KEY_ORDER[sign]
+            best_run: list[Glyph] = []
+            for clef_code in clefs:
+                base = CLEFS[clef_code][0]
+                run: list[Glyph] = []
+                for g in cands:
+                    if ACCIDENTALS[g.code] != sign or len(run) >= 7:
+                        break
+                    if run and not (2.0 <= g.x - run[-1].x <= 9.0):
+                        break
+                    if (base + st.step_of(g.y)) % 7 != order[len(run)]:
+                        break
+                    run.append(g)
+                if len(run) > len(best_run):
+                    best_run = run
+            run = best_run
+            if len(run) >= 2:
+                per_staff[st.index] = (sign * len(run), run)
+        if not per_staff:
+            continue
+        kinds = {f for f, _run in per_staff.values()}
+        lone = len(system) == 1 or staves_with_notes == 1
+        if len(kinds) == 1 and (len(per_staff) == staves_with_notes > 1 or (lone and abs(next(iter(kinds))) >= 3)):
+            for f, run in per_staff.values():
+                for g in run:
+                    found[id(g)] = f
+    return found
+
+
 def analyze_system(
     drawing: PageDrawing,
     system: list[Staff],
@@ -830,6 +1226,11 @@ def analyze_system(
         if not x_lo <= g.x <= x_hi:
             return False
         if g.code in note_parts:
+            # a note between two systems belongs to the nearer one
+            if above is not None and g.y > (above + system[0].top) / 2:
+                return False
+            if below is not None and g.y < (below + system[-1].bottom) / 2:
+                return False
             return far_bottom <= g.y <= far_top
         return sys_bottom <= g.y <= sys_top
 
@@ -864,21 +1265,69 @@ def analyze_system(
 
     # accidentals attached to a head: right next to its left side at the same height
     accidental_glyphs = [g for g in music if g.code in ACCIDENTALS]
+    leading_key = _line_start_key_glyphs(system, accidental_glyphs, heads, music, staff_of, clef_changes, state)
+    key_starts = [min(st.x0 for st in system)] + [bl.x for bl in _barlines(drawing, system)]
+    recognised_keys = _key_change_glyphs(system, accidental_glyphs, heads, staff_of, clef_changes, state, key_starts)
+    leading_key |= set(recognised_keys)
     attached: dict[int, int] = {}
+    attached_distance: dict[int, float] = {}
+
+    def attach(g: Glyph, h: Head) -> None:
+        # A cancellation natural followed by a sharp/flat can both target the
+        # same head. PDF painting order is arbitrary; the nearer sign wins.
+        distance = h.x - g.x
+        if distance < attached_distance.get(id(h), float("inf")):
+            attached[id(h)] = ACCIDENTALS[g.code]
+            attached_distance[id(h)] = distance
+
+    # A natural plus a single sharp/flat is an older spelling of cancelling a
+    # double alteration. In crowded chords both may stand beyond the primary
+    # matching window: do not turn that same-height pair into a global key.
+    compound: set[int] = set()
+    for natural in accidental_glyphs:
+        if ACCIDENTALS[natural.code] != 0 or id(natural) in leading_key:
+            continue
+        following = [g for g in accidental_glyphs if id(g) not in leading_key
+                     and ACCIDENTALS[g.code] in (-1, 1)
+                     and 2 <= g.x - natural.x <= 9
+                     and abs(g.y - natural.y) <= 0.3 * staff_of[id(g)].space]
+        if not following:
+            continue
+        sign = min(following, key=lambda g: g.x)
+        target = [h for h in heads if abs(h.y - sign.y) <= 0.3 * h.staff.space
+                  and abs(h.y - natural.y) <= 0.3 * h.staff.space
+                  and 0 < h.x - sign.x < h.x - natural.x <= 32]
+        if target:
+            h = min(target, key=lambda hh: hh.x - sign.x)
+            if any(abs(other.y - natural.y) <= 0.3 * other.staff.space
+                   and natural.x < other.x < h.x for other in heads):
+                continue  # an earlier note owns the natural; not a compound sign
+            attach(sign, h)
+            staff_of[id(natural)] = staff_of[id(sign)] = h.staff
+            compound.update((id(natural), id(sign)))
     key_glyphs: list[Glyph] = []
     for g in accidental_glyphs:
         st = staff_of[id(g)]
+        if id(g) in compound:
+            continue
+        if id(g) in leading_key:
+            key_glyphs.append(g)
+            continue
         # matched by height, not by staff: a head on ledger lines between two staves may
         # belong to the farther staff while its accidental is nearer the other one
         target = [h for h in heads if abs(h.y - g.y) <= 0.3 * h.staff.space and 0 < h.x - g.x <= 16]
+        if not target and not any(0 <= g.x - x0 <= 40 for x0 in key_starts):
+            # the accidentals of a large chord are stacked in columns, the outer ones far
+            # from their heads; away from a barline a lone run is no key signature
+            target = [h for h in heads if abs(h.y - g.y) <= 0.3 * h.staff.space and 0 < h.x - g.x <= 32]
         if target:
             h = min(target, key=lambda hh: hh.x - g.x)
             staff_of[id(g)] = h.staff
-            # keep the closest accidental per head
-            prev = attached.get(id(h))
-            attached[id(h)] = ACCIDENTALS[g.code] if prev is None else prev
-        else:
+            attach(g, h)
+        elif st.bottom - 2.5 * st.space <= g.y <= st.top + 2.5 * st.space:
             key_glyphs.append(g)
+        # (an accidental far outside the staff with no note beside it belongs to a note of
+        # another system, or is a stray: no key signature is drawn there)
 
     # key signatures: runs of unattached sharps / flats (naturals cancel)
     key_changes: dict[int, list[tuple[float, dict[int, int]]]] = defaultdict(list)
@@ -898,6 +1347,38 @@ def analyze_system(
                     clef_code = code
             base = CLEFS[clef_code][0]
             sig: dict[int, int] = {}
+            known = recognised_keys.get(id(run[0]))
+            if known is not None and all(recognised_keys.get(id(g)) == known for g in run[: abs(known)]):
+                # a key signature recognised as such: its letters follow the circle of fifths
+                sign = 1 if known > 0 else -1
+                sig = {letter: sign for letter in KEY_ORDER[sign][: abs(known)]}
+                key_changes[st.index].append((run[0].x, sig))
+                continue
+            if not any(0 <= run[0].x - x0 <= 60 for x0 in key_starts) and not any(id(g) in leading_key for g in run):
+                # a key signature stands after a barline (or the clef); stray accidentals in
+                # the middle of a bar (of a rolled chord's notes moved aside) are none
+                continue
+            if not any(id(g) in leading_key for g in run) and len(run) >= 2 and len({round(g.x) for g in run}) < len(run):
+                # two accidentals one over the other: the stacked accidentals of a chord
+                # whose notes they did not reach (a key signature runs left to right)
+                continue
+            if len({ACCIDENTALS[g.code] for g in run} - {0}) > 1 and not any(id(g) in leading_key for g in run):
+                # sharps and flats mixed: a chord's accidentals, not a key; each belongs to
+                # the note at its height a little further on
+                for g0 in run:
+                    near = [h for h in heads if abs(h.y - g0.y) <= 0.3 * h.staff.space and 0 < h.x - g0.x <= 32]
+                    if near:
+                        attach(g0, min(near, key=lambda hh: hh.x - g0.x))
+                continue
+            if len(run) == 1 and not any(id(g) in leading_key for g in run):
+                # a lone accidental with a note at its height a little further on is that
+                # note's (pushed left by the accidentals of the rest of its chord)
+                g0 = run[0]
+                near = [h for h in heads if abs(h.y - g0.y) <= 0.3 * h.staff.space and 0 < h.x - g0.x <= 32]
+                if near:
+                    h = min(near, key=lambda hh: hh.x - g0.x)
+                    attach(g0, h)
+                    continue
             for g in run:
                 alter = ACCIDENTALS[g.code]
                 if alter == 0:
@@ -932,7 +1413,16 @@ def analyze_system(
                 if ln.xmin - end <= 12:
                     end = max(end, ln.xmax)
             # a vertical hook marks the end; otherwise run to the dashes' end
-            ottavas.append((st, g.l, end + 2, OTTAVA[g.code]))
+            # (the "8" stands over the first note's head, which can start a little left of it)
+            start = g.l - 3
+            # The label can align with a notehead's stem/right edge rather
+            # than its left-origin x. Include that actual head, without
+            # widening the range far enough to catch an earlier note.
+            edge_heads = [h for h in music if h.code in HEADS and staff_of[id(h)] is st
+                          and h.x < g.l and abs(h.r - g.l) <= 0.15 * st.space]
+            if edge_heads:
+                start = min(start, min(h.x for h in edge_heads) + 2)
+            ottavas.append((st, start, end + 2, OTTAVA[g.code]))
 
     # --- stems
     verticals = [ln for ln in drawing.lines if ln.vertical and ln.width < 1.3 and ln.ymax - ln.ymin >= 6]
@@ -965,6 +1455,22 @@ def analyze_system(
         if not up and abs(anchor - ln.ymax) > 4.5:
             continue
         stem_members.append((Stem(ln, up), members))
+    # Two stems standing at one x, one over the other (a second voice's note under the first
+    # voice's stem): a head belongs to the stem that ends at it.
+    for i, (s1, m1) in enumerate(stem_members):
+        for s2, m2 in stem_members[i + 1 :]:
+            if abs(s1.line.x0 - s2.line.x0) > 0.3 or s1.up != s2.up:
+                continue
+            ids2 = {id(h) for h in m2}
+            for h in list(m1):
+                if id(h) not in ids2:
+                    continue
+                d1 = abs(h.y - (s1.line.ymin if s1.up else s1.line.ymax))
+                d2 = abs(h.y - (s2.line.ymin if s2.up else s2.line.ymax))
+                if d1 < d2 - 0.5:
+                    m2.remove(h)
+                elif d2 < d1 - 0.5:
+                    m1.remove(h)
     # Closely spaced notes (16th runs) touch the next note's stem too: a head first joins a
     # stem on its normal side; a head on the other side of a stem is only the displaced
     # head of a second in a chord, so it joins only if nothing claimed it normally.
@@ -1008,14 +1514,26 @@ def analyze_system(
         if ln.width >= 2.5 and (ln.xmax - ln.xmin) >= 2.5 and abs(ln.y1 - ln.y0) <= 0.8 * (ln.xmax - ln.xmin)
     ]
 
+    def reaches(bm: Line, s: Stem) -> float | None:
+        """Height of the beam at the stem, when the beam reaches the stem. Some generators
+        stop a beam a little short of the group's last stem (by up to half a space): such a
+        stem still belongs to it when its free end lies on the beam's line."""
+        x = s.line.x0
+        if bm.xmin - 1.0 <= x <= bm.xmax + 1.0:
+            return bm.y_at(min(max(x, bm.xmin), bm.xmax))
+        if bm.xmin - 2.5 <= x <= bm.xmax + 2.5:
+            y = bm.y_at(x)
+            end = s.line.ymax if s.up else s.line.ymin
+            if abs(y - end) <= 1.5:
+                return y
+        return None
+
     def stems_touching(bm: Line) -> list[Stem]:
         out = []
         for s in stems:
-            x = s.line.x0
-            if bm.xmin - 1.0 <= x <= bm.xmax + 1.0:
-                y = bm.y_at(min(max(x, bm.xmin), bm.xmax))
-                if s.line.ymin - 3.5 <= y <= s.line.ymax + 3.5:
-                    out.append(s)
+            y = reaches(bm, s)
+            if y is not None and s.line.ymin - 3.5 <= y <= s.line.ymax + 3.5:
+                out.append(s)
         return out
 
     # Tremolos. Strokes centred on a single stem (or floating over a stemless head) are
@@ -1083,20 +1601,44 @@ def analyze_system(
 
     for s in stems:
         x = s.line.x0
+        end = s.line.ymax if s.up else s.line.ymin
         ys: list[float] = []
         for bm in beams:
-            if bm.xmin - 1.0 <= x <= bm.xmax + 1.0:
-                y = bm.y_at(min(max(x, bm.xmin), bm.xmax))
+            y = reaches(bm, s)
+            if y is not None:
                 if s.line.ymin - 3.5 <= y <= s.line.ymax + 3.5:
                     # only beams near the free end, not ones crossing the heads
-                    end = s.line.ymax if s.up else s.line.ymin
                     if abs(y - end) <= 2.8 + 4.6 * 4:
                         ys.append(round(y, 1))
+        if ys:
+            # The beam nearest the free end starts the stack, and the others lie inward of it.
+            # One further out is the beam of other notes (the other staff's, another voice's)
+            # that comes close; counting it would turn an eighth into a sixteenth.
+            sign = 1 if s.up else -1
+            first = min(ys, key=lambda yy: (round(abs(yy - end), 1), (yy - end) * sign))
+            ys = [yy for yy in ys if (yy - first) * sign <= 1.5]
         uniq: list[float] = []
         for y in sorted(ys):
             if not uniq or y - uniq[-1] > 1.5:
                 uniq.append(y)
         s.beams = len(uniq)
+
+    # beam groups: stems joined by beams (for tuplets printed without their number)
+    parent: dict[int, int] = {id(s): id(s) for s in stems}
+
+    def find(a: int) -> int:
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    for bm in beams:
+        touch = stems_touching(bm)
+        for a, b in zip(touch, touch[1:]):
+            parent[find(id(a))] = find(id(b))
+    for s in stems:
+        if s.beams:
+            s.beam_group = find(id(s))
 
     # small noteheads beamed together with normal ones are cue-size notes with their own
     # rhythm (e.g. optional inner notes), not grace notes
@@ -1124,13 +1666,34 @@ def analyze_system(
                 h.grace = False
 
     # tuplet numbers ("3", "6", "5" in small text) over a beamed group or a bracket
+    def own_mark(g: Glyph) -> bool:
+        """On this system's side of the line halfway to the neighbouring system."""
+        if above is not None and g.y > (above + system[0].top) / 2:
+            return False
+        if below is not None and g.y < (below + system[-1].bottom) / 2:
+            return False
+        return True
+
+    # Duplets and quadruplets (2 or 4 eighths in the time of 3 or 6 in 6/8, 12/8 ...) are
+    # numbered too, but a 2 or 4 is also a fingering: they are taken only in a compound meter,
+    # from MuseScore pages (tuplet numbers in their own size), over a beamed group of exactly
+    # that many equal notes centred under or over the number.
+    compound = state.meter[1] == 8 and state.meter[0] % 3 == 0 and state.meter[0] > 3
     tuplet_marks = [
-        g for g in glyphs
-        if not g.music and g.text in "35679" and 13 <= g.size <= 17.5 and x_lo <= g.x <= x_hi and sys_bottom <= g.y <= sys_top
+        g for g in _tuplet_numbers(glyphs)
+        if (g.text in ("3","5","6","7","9") or (g.text in ("2","4") and compound and drawing.smufl)
+            or (10 <= int(g.text) <= 32))
+        and x_lo <= g.x <= x_hi and sys_bottom <= g.y <= sys_top
     ]
+    all_rests = [g for g in music if g.code in RESTS]
+    rest_group: dict[int, Tuplet] = {}
     for g in tuplet_marks:
         n = int(g.text)
-        ratio = {3: 2 / 3, 5: 4 / 5, 6: 4 / 6, 7: 4 / 7, 9: 8 / 9}[n]
+        even = n in (2, 4)
+        ratio = {2: 3 / 2, 4: 3 / 4}.get(n,2 ** int(math.log2(n-1)) / n)
+        # a number between two systems (e.g. under the lower staff of the system above) is
+        # not this system's unless notes here make a tuplet right by it
+        foreign = drawing.smufl and not own_mark(g)
         st = _nearest_staff(system, g.cy)
         # bracket: horizontal line pieces at the number's height
         pieces = [
@@ -1148,40 +1711,198 @@ def analyze_system(
                 if ln.xmax > hi + 0.1 and ln.xmin <= hi + 4:
                     hi = ln.xmax
                     grown = True
+        group_beams: list[Line] = []
         if hi - lo < 8:
-            # no bracket: the beam group nearest to the number
-            near = [bm for bm in beams if bm.xmin - 2 <= g.cx <= bm.xmax + 2 and abs(bm.y_at(g.cx) - g.cy) <= 16]
+            # no bracket: the beam group nearest to the number (a duplet / quadruplet number
+            # of MuseScore stands further off its beam, on the far side of a high stem)
+            reach = 40 if even else 16
+            near = [bm for bm in beams if bm.xmin - 2 <= g.cx <= bm.xmax + 2 and abs(bm.y_at(g.cx) - g.cy) <= reach]
             if near:
-                bm = min(near, key=lambda b: abs(b.y_at(g.cx) - g.cy))
+                def group_of(bm: Line) -> list[Line]:
+                    # the beam and those touching it at the same height
+                    out = [bm]
+                    for other in beams:
+                        if (
+                            other is not bm and abs(other.y_at(other.xmin) - bm.y_at(other.xmin)) <= 6
+                            and other.xmin <= bm.xmax + 1 and other.xmax >= bm.xmin - 1
+                        ):
+                            out.append(other)
+                    return out
+
+                def centring(gb: list[Line]) -> float:
+                    """How far the number is off the middle of the ``n`` stems of this beam group
+                    that it sits nearest to (a tuplet number is centred over its notes)."""
+                    xs = sorted({id(s): s.line.x0 for b in gb for s in stems_touching(b)}.values())
+                    if not xs:
+                        return 999.0
+                    if len(xs) < n:
+                        return abs((xs[0] + xs[-1]) / 2 - g.cx)
+                    return min(abs((xs[i] + xs[i + n - 1]) / 2 - g.cx) for i in range(len(xs) - n + 1))
+
+                if drawing.smufl:
+                    scored = [(centring(group_of(b)), abs(b.y_at(g.cx) - g.cy), b) for b in near]
+                    best_err = min(s[0] for s in scored)
+                    bm = min((s for s in scored if s[0] <= best_err + 1.5), key=lambda s: s[1])[2]
+                else:
+                    bm = min(near, key=lambda b: abs(b.y_at(g.cx) - g.cy))
                 lo, hi = bm.xmin, bm.xmax
+                group_beams = [bm]
                 # extend through beams touching this one at the same height
                 for other in beams:
                     if other is not bm and abs(other.y_at(other.xmin) - bm.y_at(other.xmin)) <= 6 and other.xmin <= hi + 1 and other.xmax >= lo - 1:
                         lo, hi = min(lo, other.xmin), max(hi, other.xmax)
+                        group_beams.append(other)
             else:
                 lo, hi = g.cx - 14, g.cx + 14
-        # The number belongs to the staff whose notes under the bracket add up to a tuplet
-        # (3 eighths, 3 quarters ...). A bracket under the upper staff's notes can be nearer
-        # to the lower staff; when both or neither add up, the nearest staff keeps it.
-        def adds_up(staff: Staff) -> bool:
-            total = 0.0
-            for s in stems:
-                if lo - 7 <= s.line.x0 <= hi + 1.5 and _nearest_staff(system, s.heads[0].y) is staff:
-                    base = min(h.kind for h in s.heads)
-                    total += base if base >= 2.0 else 0.5 ** max(s.beams, s.flags)
-            for r in music:
-                if r.code in RESTS and lo - 7 <= r.x <= hi + 1.5 and staff_of.get(id(r)) is staff:
-                    total += RESTS[r.code]
+
+        def unit_of(s: Stem | None, r: Glyph | None) -> float:
+            if s is not None:
+                base = min(h.kind for h in s.heads)
+                return base if base >= 2.0 else 0.5 ** max(s.beams, s.flags)
+            return RESTS[r.code]
+
+        def fills_units(total: float) -> bool:
+            """``total`` quarters make ``n`` equal units of a plain note value (a tuplet)."""
             if total <= 0:
                 return False
             unit = total / n
             return abs(math.log2(unit) - round(math.log2(unit))) < 0.01
-        fitting = [x for x in system if adds_up(x)] if drawing.smufl else []
+
+        def pool_for(staff: Staff) -> list[tuple[float, Stem | None, Glyph | None]]:
+            if group_beams:
+                beamed = {id(s) for b in group_beams for s in stems_touching(b)}
+                pool = [s for s in stems if id(s) in beamed]
+            else:
+                pool = [s for s in stems if lo - 7 <= s.line.x0 <= hi + 1.5]
+                # a bracket stands at the stem ends of its notes: in a staff of two voices
+                # the notes of the other voice (stems pointing away from it) are not its
+                toward = [s for s in pool if (s.up and s.line.ymax <= g.cy + 2) or (not s.up and s.line.ymin >= g.cy - 2)]
+                away = [s for s in pool if s not in toward]
+                if toward and away and drawing.smufl:
+                    pool = toward
+            return [(s.line.x0, s, None) for s in pool if s.heads[0].staff is staff]
+
+        def best_run(staff: Staff) -> tuple[float, list[tuple[float, Stem | None, Glyph | None]], float] | None:
+            """The run of neighbouring notes (and rests) of ``staff`` that this number counts,
+            as (how well it fits, the run, its vertical distance from the number). A tuplet
+            number is centred over its notes, close above or below them, and they fill ``n``
+            equal units. Of the beam group's notes and the rests among them that is the run to
+            take: the number of a group of eighth + 16th + 16th + 16th that has a triplet of
+            16ths at its end counts only those three."""
+            notes = pool_for(staff)
+            rests = [(r.cx, None, r) for r in all_rests if lo - 2 <= r.cx <= hi + 2 and staff_of.get(id(r)) is staff]
+            items = sorted(notes + rests, key=lambda it: it[0])
+            best: tuple[float, list[tuple[float, Stem | None, Glyph | None]], float] | None = None
+            for i in range(len(items)):
+                total = 0.0
+                for j in range(i, len(items)):
+                    total += unit_of(items[j][1], items[j][2])
+                    if j == i or not fills_units(total):
+                        continue
+                    err = abs((items[i][0] + items[j][0]) / 2 - g.cx)
+                    if err > 14:
+                        continue
+                    run = items[i : j + 1]
+                    # how far the number stands from the run, vertically
+                    ends: list[float] = []
+                    for _x, s, r in run:
+                        if s is not None:
+                            ends += [abs(g.cy - s.line.ymin), abs(g.cy - s.line.ymax)]
+                        else:
+                            ends.append(abs(g.cy - r.cy))
+                    fit = min(ends) + 2.0 * err
+                    if best is None or fit < best[0] - 1.0 or (fit <= best[0] + 1.0 and len(run) < len(best[1])):
+                        best = (fit, run, min(ends))
+            return best
+
+        def items_for(staff: Staff) -> list[tuple[float, Stem | None, Glyph | None]]:
+            """The notes (stems) and rests of ``staff`` that the number counts (without a run
+            that fills the units: the stems of the beam group, or the ``n`` of them in a row
+            centred on the number when they are all of one length)."""
+            run = best_run(staff)
+            if run is not None:
+                return run[1]
+            its = pool_for(staff)
+            if len(its) < n:  # rests are members too
+                its += [
+                    (r.cx, None, r) for r in all_rests
+                    if lo - 2 <= r.cx <= hi + 2 and staff_of.get(id(r)) is staff
+                ]
+            its.sort(key=lambda it: it[0])
+            if len(its) > n and len({round(unit_of(s, r), 4) for _x, s, r in its}) == 1:
+                first = min(range(len(its) - n + 1), key=lambda i: abs((its[i][0] + its[i + n - 1][0]) / 2 - g.cx))
+                its = its[first : first + n]
+            return its
+
+        # The number belongs to the staff whose notes under it make a tuplet (3 eighths, 3
+        # quarters ...) and are centred under it. A bracket under the upper staff's notes can
+        # be nearer to the lower staff; when neither staff has such notes, the staff of the
+        # beam (or the nearest staff) keeps it.
+        def adds_up(staff: Staff) -> bool:
+            return best_run(staff) is not None
+
+        fitting = [x for x in system if adds_up(x)]
+        if not fitting and group_beams:
+            # the beam nearest to the number holds no tuplet under it: the number may be the
+            # one of other notes it is centred over (a 16th triplet of the upper staff whose
+            # number stands by the lower staff's beam)
+            saved = (group_beams, lo, hi)
+            group_beams, lo, hi = [], g.cx - 30, g.cx + 30
+            fitting = [x for x in system if adds_up(x)]
+            if not fitting:
+                group_beams, lo, hi = saved
+        if foreign:
+            fitting = [x for x in fitting if best_run(x)[2] <= 16.0]  # type: ignore[index]
+            if not fitting:
+                continue
         if len(fitting) == 1:
             st = fitting[0]
-        affected = [s for s in stems if lo - 7 <= s.line.x0 <= hi + 1.5 and _nearest_staff(system, s.heads[0].y) is st]
-        for s in affected:
-            s.tuplet = ratio
+        elif len(fitting) > 1:
+            st = min(fitting, key=lambda x: (best_run(x)[0], abs(x.mid - g.cy)))  # type: ignore[index]
+        elif group_beams:
+            # no staff adds up: the number sits by a beam, and the beam's own staff owns it
+            owners = [s.heads[0].staff for b in group_beams for s in stems_touching(b)]
+            if owners:
+                st = max(owners, key=lambda o: sum(1 for p in owners if p is o))
+        members = items_for(st)
+        if n >= 10:
+            beam_members = pool_for(st)
+            if len(beam_members) == n and len({unit_of(s,r) for _x,s,r in beam_members}) == 1:
+                members = beam_members
+            # Multi-digit text needs a complete musical group, not merely a
+            # nearby fingering, measure number or the last digit of a label.
+            if not group_beams or not fills_units(sum(unit_of(s,r) for _x,s,r in members)):
+                continue
+        if even:
+            # the beam group's own notes, all of them: n equal eighths (or 16ths)
+            if not group_beams:
+                continue
+            beamed = sorted(
+                {id(s): s for b in group_beams for s in stems_touching(b)}.values(), key=lambda s: s.line.x0
+            )
+            if len(beamed) != n or len({s.heads[0].staff.index for s in beamed}) != 1:
+                continue
+            units = {round(unit_of(s, None), 4) for s in beamed}
+            if len(units) != 1 or next(iter(units)) > 0.5:
+                continue
+            xs = [s.line.x0 for s in beamed]
+            if abs((xs[0] + xs[-1]) / 2 - g.cx) > 10:
+                continue  # not centred over them: a fingering
+            st = beamed[0].heads[0].staff
+            members = [(s.line.x0, s, None) for s in beamed]
+        group = Tuplet(n, ratio)
+        if _DEBUG:
+            print(
+                "TUPLET", n, "at", round(g.cx, 1), round(g.cy, 1), "extent", round(lo, 1), round(hi, 1),
+                "beams", len(group_beams), "fitting", [x.index for x in fitting], "staff", st.index,
+                "members", [round(m[0], 1) for m in members],
+            )
+        for _x, s, r in members:
+            if s is not None:
+                s.tuplet = ratio
+                s.group = group
+            elif r is not None:
+                rest_group[id(r)] = group
         for h in heads:
             if h.stem is None and h.staff is st and lo - 7 <= h.x <= hi + 1.5:
                 h.dots = h.dots  # whole/breve inside tuplet: rare, ignore
@@ -1216,7 +1937,7 @@ def analyze_system(
     for g in pieces:
         for line in lines_:
             last = line[-1]
-            if abs(g.x - last.x) <= 1.5 and -1.0 <= g.b - last.t <= 3.0:
+            if abs(g.x - last.x) <= 1.5 and -0.6 * (last.t - last.b) <= g.b - last.t <= 3.0:
                 line.append(g)
                 break
         else:
@@ -1234,35 +1955,49 @@ def analyze_system(
                 h.arpeggio = True
 
     # ties: a curve from just right of a head to just left of a head at the same height
+    # (MuseScore ties start further from the head's centre than the ones of other programs)
+    tie_dy = 5.6 if drawing.smufl else 4.2
+    tie_curves: list[list[tuple[float, tuple, tuple]]] = []
     for cv in drawing.curves:
         left_x, right_x = min(cv.x0, cv.x1), max(cv.x0, cv.x1)
         ly = cv.y0 if cv.x0 <= cv.x1 else cv.y1
         ry = cv.y1 if cv.x0 <= cv.x1 else cv.y0
-        if not (x_lo <= left_x <= x_hi and sys_bottom <= ly <= sys_top):
+        # (as far out as the noteheads are looked for: the tie of a note on many ledger lines)
+        if not (x_lo <= left_x <= x_hi and far_bottom - 8 <= ly <= far_top + 8):
             continue
         if abs(ly - ry) > 3.5:
             continue
-        start = [h for h in heads if -2 <= left_x - h.x <= head_w + 4 and abs(h.y - ly) <= 4.2]
-        end = [h for h in heads if -3 <= h.x - right_x <= 4 and abs(h.y - ry) <= 4.2]
+        # (a whole note's head is about 1.6 times as wide as a black one)
+        start = [h for h in heads if -2 <= left_x - h.x <= head_w * (1.6 if h.kind >= 4.0 else 1.0) + 4 and abs(h.y - ly) <= tie_dy]
+        # (a tie under a whole note's wide head can end a little inside it)
+        end = [h for h in heads if -(5.0 if h.kind >= 4.0 else 3.0) <= h.x - right_x <= 4 and abs(h.y - ry) <= tie_dy]
+        options: list[tuple[float, tuple, tuple]] = []
         if start and end:
-            s_h = min(start, key=lambda h: abs(h.y - ly))
-            e_h = min(end, key=lambda h: abs(h.y - ry))
-            between = [
-                h for h in heads
-                if h.staff is s_h.staff and h.step == s_h.step and s_h.x + 2 < h.x < e_h.x - 2
-            ]
-            # a curve over a repeated note is a slur (phrase), not a tie
-            if s_h.step == e_h.step and s_h.staff is e_h.staff and e_h is not s_h and not between:
-                e_h.tied = True
+            # the pairs of one pitch that this curve could join; a curve over a repeated note
+            # is a slur (phrase), not a tie
+            for a in start:
+                for b in end:
+                    if a.staff is b.staff and a.step == b.step and b.x > a.x and not any(
+                        h.staff is a.staff and h.step == a.step and a.x + 2 < h.x < b.x - 2 for h in heads
+                    ):
+                        options.append((abs(a.y - ly) + abs(b.y - ry), (("s", id(a)), ("e", id(b))), ("tie", a, b)))
         elif start and not end and right_x >= start[0].staff.x1 - 12:
-            s_h = min(start, key=lambda h: abs(h.y - ly))
-            s_h._tie_out = True  # type: ignore[attr-defined]
+            options = [(abs(a.y - ly), (("s", id(a)),), ("out", a, None)) for a in start]
         elif end and not start:
             st0 = end[0].staff
             first_x = min((h.x for h in heads if h.staff is st0), default=0)
-            e_h = min(end, key=lambda h: abs(h.y - ry))
-            if e_h.x <= first_x + 30:
-                e_h._tie_in = True  # type: ignore[attr-defined]
+            options = [(abs(b.y - ry), (("e", id(b)),), ("in", None, b)) for b in end if b.x <= first_x + 30]
+        if options:
+            tie_curves.append(options)
+    # Several ties between the notes of two chords each sit about as near to two heads: let
+    # every head take part in one tie at most, and as many curves as possible find theirs.
+    for kind, a, b in _assign_curves(tie_curves):
+        if kind == "tie":
+            b.tied = True
+        elif kind == "out":
+            a._tie_out = True  # type: ignore[attr-defined]
+        else:
+            b._tie_in = True  # type: ignore[attr-defined]
 
     # --- barlines and bars
     barlines = _barlines(drawing, system)
@@ -1289,11 +2024,15 @@ def analyze_system(
             length = 0.5 ** n
         dots = max(h.dots for h in s.heads)
         length *= 2 - 0.5 ** dots
+        written = length
         length *= s.tuplet
         normal = [h for h in s.heads if (h.x <= s.line.x0 - 2) == s.up] or s.heads
         x = min(h.x for h in normal) if s.up else min(h.x for h in normal)
         grace = all(h.grace for h in s.heads)
-        events.append(Event(x, s.heads[0].staff, length, s.heads, grace=grace, y=sum(h.y for h in s.heads) / len(s.heads)))
+        events.append(Event(
+            x, s.heads[0].staff, length, s.heads, grace=grace, y=sum(h.y for h in s.heads) / len(s.heads),
+            base=written, group=s.group, beam_group=s.beam_group,
+        ))
     loose = [h for h in heads if h.stem is None]
     loose.sort(key=lambda h: (h.staff.index, h.x))
     groups: list[list[Head]] = []
@@ -1310,8 +2049,13 @@ def analyze_system(
         # a rest's dot sits in the space by the rest's upper part (an 8th rest's dot is level
         # with its top), not at the glyph's centre
         n = count_dots(g.r, g.cy, st, used_dots, min(g.cy - st.space * 0.8, g.b), max(g.cy + st.space * 0.8, g.t + st.space * 0.5))
-        length = RESTS[g.code] * (2 - 0.5 ** n)
-        events.append(Event(g.l, st, length, [], full_bar_rest=g.code == WHOLE_REST and n == 0, y=g.cy))
+        written = RESTS[g.code] * (2 - 0.5 ** n)
+        group = rest_group.get(id(g))
+        length = written * (group.ratio if group is not None else 1.0)
+        events.append(Event(
+            g.l, st, length, [], full_bar_rest=g.code == WHOLE_REST and n == 0, y=g.cy,
+            base=written, group=group,
+        ))
 
     # tremolos: single-note slashes repeat the note; a two-note tremolo alternates two
     # notes that together last the value written on each of them
@@ -1359,6 +2103,7 @@ def analyze_system(
         for st in system:
             stt = state.staff(st.index)
             alters: dict[tuple[int, int], int] = {}
+            stt.key_in_bar = dict(stt.key)  # type: ignore[attr-defined]
             for ev in sorted([e for e in in_bar if e.staff is st], key=lambda e: e.x):
                 for cx, code in sorted(clef_changes.get(st.index, [])):
                     if cx <= ev.x:
@@ -1366,12 +2111,21 @@ def analyze_system(
                 for kx, sig in key_changes.get(st.index, []):
                     if kx <= ev.x and kx >= a - 30:
                         stt.key = dict(sig)
+                        stt.key_in_bar = dict(sig)  # type: ignore[attr-defined]
+                ev.key_signature = dict(stt.key)
                 base = CLEFS[stt.clef][0]
                 for h in ev.heads:
                     dia = base + h.step
                     if id(h) in attached:
                         alters[(dia, 0)] = attached[id(h)]
                     alter = alters.get((dia, 0), stt.key.get(dia % 7, 0))
+                    # a note tied over from an altered note keeps that alteration in the next
+                    # bar too (an accidental lasts its bar, but a tie holds the note on)
+                    tied_in = h.tied or getattr(h, "_tie_in", False) or (ev.x <= a + 40 and bi <= 1 and dia in stt.last_alter
+                                                                           and _diatonic_to_midi(dia, stt.last_alter[dia]) in stt.pending_ties)
+                    if tied_in and (dia, 0) not in alters and dia in stt.last_alter:
+                        alter = stt.last_alter[dia]  # the tied note only, not the rest of the bar
+                    stt.last_alter[dia] = alter
                     shift = 0
                     for ost, ox0, ox1, osh in ottavas:
                         if ost is st and ox0 - 2 <= h.x <= ox1:
@@ -1398,6 +2152,7 @@ def analyze_system(
                 meter = m
         state.meter = meter
         bar = Bar(sorted(in_bar, key=lambda e: e.x), meter=meter, x0=a, x1=b)
+        bar.keys = [dict(getattr(state.staff(st.index), "key_in_bar", {})) for st in system]
         left = bar_info[bi] if bi < len(bar_info) else None
         right = bar_info[bi + 1] if bi + 1 < len(bar_info) else None
         bar.repeat_start = bool(left and left.repeat_start)
@@ -1420,34 +2175,190 @@ def analyze_system(
 # ---------------------------------------------------------------- timing inside bars
 
 
-def _layout_staff(events: list[Event]) -> float:
-    """Onsets of one staff's events, read left to right.
+DISPLACE_MAX = 7.2  # a note moved sideways to clear another voice's head: at most a head width
+MAX_READINGS = 1200  # readings tried for one staff of one bar before giving up
+TIME_EPS = 1e-4      # quarters: times closer than this are the same time
 
-    Events printed at the same x start together (chords and the voices of a two-voice
-    staff). The next column starts when the earliest still-sounding event ends.
-    """
+
+def _columns(events: list[Event], merge: frozenset[int] = frozenset()) -> list[list[Event]]:
+    """Events by column: those printed at (nearly) one x start together. ``merge`` closes up
+    column boundaries (indexes into the plain columns), see ``_merge_candidates``."""
     cols: list[list[Event]] = []
     for e in sorted(events, key=lambda ev: ev.x):
         if cols and e.x - cols[-1][0].x <= 2.2:
             cols[-1].append(e)
         else:
             cols.append([e])
+    if not merge:
+        return cols
+    out: list[list[Event]] = []
+    for i, col in enumerate(cols):
+        if i - 1 in merge and out:
+            out[-1].extend(col)
+        else:
+            out.append(list(col))
+    return out
+
+
+def _stem_dir(e: Event) -> str:
+    stem = e.heads[0].stem if e.heads else None
+    return "" if stem is None else ("u" if stem.up else "d")
+
+
+def _merge_candidates(events: list[Event]) -> list[int]:
+    """Column boundaries that may be one column: where voices of a staff collide, one voice's
+    notes are moved sideways (by up to a head width) to clear the other's heads or stems, so
+    a note a little to the right of a column can start with it. Column boundaries closer
+    than that are candidates; only a reading that makes the bar add up uses them."""
+    cols = _columns(events)
+    return [i for i in range(len(cols) - 1) if cols[i + 1][0].x - cols[i][0].x <= DISPLACE_MAX]
+
+
+def _anchor_time(x: float, anchors: tuple[tuple[float, float], ...]) -> float | None:
+    """The time of a column at ``x`` known from the columns of a staff that adds up: events of
+    any staff printed at one x start together. A column a little off an anchor counts when no
+    other anchor is nearly as close (a note moved aside by another voice)."""
+    if not anchors:
+        return None
+    ranked = sorted(anchors, key=lambda a: abs(a[0] - x))
+    d1 = abs(ranked[0][0] - x)
+    if d1 > DISPLACE_MAX:
+        return None
+    if d1 <= 2.2:
+        return ranked[0][1]
+    others = [a for a in ranked[1:] if abs(a[1] - ranked[0][1]) > 1e-6]
+    if others and abs(others[0][0] - x) - d1 < 6.0:
+        return None
+    return ranked[0][1]
+
+
+def _layout_staff(
+    events: list[Event],
+    merge: frozenset[int] = frozenset(),
+    anchors: tuple[tuple[float, float], ...] = (),
+) -> float:
+    """Onsets of one staff's events, read left to right.
+
+    Events printed at the same x start together (chords and the voices of a two-voice
+    staff). The next column starts when the earliest still-sounding event ends. ``anchors``
+    ((x, time) of the columns of another staff that adds up) fix the time of the columns
+    that stand at the same x.
+    """
+    cols = _columns(events, merge)
     t = 0.0
+    prev_t = -1.0
     active: list[float] = []
     total = 0.0
     for i, col in enumerate(cols):
+        if anchors:
+            xs = sorted(e.x for e in col)
+            forced = _anchor_time(xs[len(xs) // 2], anchors)
+            if forced is not None and forced > prev_t + TIME_EPS:
+                t = forced
         for e in col:
             e.t = t
             active.append(t + e.length)
             total = max(total, t + e.length)
+        prev_t = t
         if i + 1 < len(cols):
-            later = [end for end in active if end > t + 1e-6]
+            later = [end for end in active if end > t + TIME_EPS]
             t = min(later) if later else t + min(e.length for e in col)
     return max(total, t)
 
 
 def _fits(total: float, meter_q: float) -> bool:
     return abs(total - meter_q) <= 0.04 * meter_q
+
+
+def _exact(total: float, meter_q: float) -> bool:
+    return abs(total - meter_q) <= 1e-3
+
+
+def _tuplet_complete(group: Tuplet, events: list[Event]) -> bool:
+    """True when the notes and rests found under a tuplet number add up to n equal units
+    (three eighths under a 3, a quarter and an eighth under a 3 ...): nothing is missing, so
+    its usual ratio is right. Otherwise a member went unseen or the number belongs to
+    something else, and another ratio may be what the bar needs."""
+    total = sum(e.base for e in events if e.group is group)
+    if total <= 0 or group.n <= 0:
+        return False
+    unit = total / group.n
+    return abs(math.log2(unit) - round(math.log2(unit))) < 0.01
+
+
+def _repair_staff(
+    events: list[Event],
+    meter_q: float,
+    anchors: tuple[tuple[float, float], ...] = (),
+) -> float | None:
+    """Re-read a staff that does not add up to its bar, in the ways a score is likely to be
+    misread, and keep the first reading that fills the bar exactly (the fewest changes
+    first): notes moved aside by another voice count as starting with their neighbours, and
+    a tuplet may be a quintuplet or the like rather than a triplet. ``anchors``: times of
+    columns known from another staff (see ``_layout_staff``).
+
+    Returns the staff's length, or None (the events then keep the plain reading)."""
+    groups: list[Tuplet] = []
+    for e in events:
+        if e.group is not None and all(e.group is not g for g in groups):
+            groups.append(e.group)
+    merges = _merge_candidates(events)
+    if not merges and not groups and not anchors:
+        return None
+    # boundaries between voices that stand apart (opposite stems) are the likelier merges
+    cols0 = _columns(events)
+
+    def crossed(i: int) -> bool:
+        a = {_stem_dir(e) for e in cols0[i]} - {""}
+        b = {_stem_dir(e) for e in cols0[i + 1]} - {""}
+        return ("u" in a and "d" in b) or ("d" in a and "u" in b)
+
+    merge_sets: list[frozenset[int]] = [frozenset()]
+    if merges:
+        if len(merges) <= 6:
+            for mask in range(1, 1 << len(merges)):
+                merge_sets.append(frozenset(m for i, m in enumerate(merges) if mask >> i & 1))
+        else:
+            # many candidates: one or two at a time, or all
+            merge_sets.append(frozenset(merges))
+            merge_sets.extend(frozenset([m]) for m in merges)
+            merge_sets.extend(frozenset([a, b]) for i, a in enumerate(merges) for b in merges[i + 1 :])
+    merge_sets.sort(key=lambda ms: (sum(1 for m in ms if not crossed(m)), len(ms)))
+    # (group, ratio) changes: none first, then one group at a time. With anchors the times of
+    # the columns are given by another staff, and a different ratio would only make the end fit.
+    changes: list[tuple[Tuplet, float] | None] = [None]
+    if not anchors:
+        for g in groups:
+            if _tuplet_complete(g, events):
+                continue  # a tuplet with all its notes is read as written
+            for r in TUPLET_RATIOS:
+                if abs(r - g.default) > 1e-9:
+                    changes.append((g, r))
+    order = [(m, c) for c in changes for m in merge_sets]
+
+    def cost(mc: tuple[frozenset[int], tuple[Tuplet, float] | None]) -> int:
+        m, c = mc
+        return sum(1 for i in m if not crossed(i)) * 2 + len(m) + (0 if c is None else 3)
+
+    order.sort(key=cost)
+
+    def set_ratio(group: Tuplet, ratio: float) -> None:
+        group.ratio = ratio
+        for ev in events:
+            if ev.group is group:
+                ev.set_ratio()
+
+    for merge, change in order[:MAX_READINGS]:
+        if not merge and change is None and not anchors:
+            continue  # the plain reading is the caller's
+        if change is not None:
+            set_ratio(*change)
+        total = _layout_staff(events, merge, anchors)
+        if _exact(total, meter_q):
+            return total
+        if change is not None:
+            set_ratio(change[0], change[0].default)
+    return None
 
 
 def _voice_split(events: list[Event]) -> tuple[list[Event], list[Event]] | None:
@@ -1483,23 +2394,135 @@ def _voice_split(events: list[Event]) -> tuple[list[Event], list[Event]] | None:
     return best[1], best[2]
 
 
+def _unmarked_tuplets(events: list[Event], meter_q: float) -> float | None:
+    # Preserve a complete reading of unmarked members first. Combining a
+    # labelled quarter+sixteenth with neighbouring unmarked sixteenths can
+    # obscure the latter's three equal units in an otherwise mixed beam.
+    result = _unmarked_tuplet_pass(events,meter_q,include_partial=False)
+    if result is not None:
+        return result
+    return _unmarked_tuplet_pass(events,meter_q,include_partial=True)
+
+
+def _unmarked_tuplet_pass(events: list[Event], meter_q: float, *, include_partial: bool) -> float | None:
+    """A staff too long for its bar whose beam groups of 3 (or 6) equal notes are triplets
+    (sextuplets) printed without their number, as after the first few bars of a run of
+    triplets. The groups are read as tuplets, all of them or, failing that, as few as
+    needed; the reading must fill the bar exactly. Returns the staff's length, or None
+    (the events are left as they were)."""
+    by_group: dict[int, list[Event]] = defaultdict(list)
+    for e in events:
+        compatible = e.group is None or (include_partial and e.group.n == 3 and abs(e.group.ratio-2/3) < 1e-8)
+        if e.beam_group and compatible and e.heads and not e.grace:
+            by_group[e.beam_group].append(e)
+    cands: list[list[Event]] = []
+    for grp in by_group.values():
+        cols = _columns(grp)
+        if any(e.group is not None for e in grp):
+            # Sparse labels may cover a continuous beam of two triples.
+            # An incomplete label in only three notes or a mixed-value beam
+            # is ambiguous: don't alter preceding plain notes to compensate
+            # for a missing member elsewhere in that labelled tuplet.
+            if len(cols)==6 and len({round(e.base,4) for e in grp})==1 and grp[0].base<=.5:
+                cands.append(grp)
+            continue
+        if len(cols) in (3, 6) and len({round(e.base, 4) for e in grp}) == 1 and grp[0].base <= 0.5:
+            cands.append(grp)
+            continue
+        # a run of 3 (or 6) equal short notes opening a longer beam group (16th 16th 16th
+        # eighth: the triplet of 16ths and a plain eighth)
+        for n in (6, 3):
+            if len(cols) > n:
+                head = [e for c in cols[:n] for e in c]
+                if len({round(e.base, 4) for e in head}) != 1 or head[0].base > 0.25:
+                    continue
+                if cols[n][0].base != head[0].base or (n == 3 and len(cols) == 5):
+                    # (5 equal notes: a triplet and two plain ones, as 3 + 2 16ths make a beat
+                    # and a half of a beat)
+                    cands.append(head)
+                    break
+    if not cands:
+        return None
+    saved = [(e, e.length, e.t) for e in events]
+
+    def apply(chosen: list[list[Event]]) -> float:
+        for e, length, _t in saved:
+            e.length = length
+        for grp in chosen:
+            for e in grp:
+                e.length = e.base * 2 / 3
+        return _layout_staff(events)
+
+    options: list[list[list[Event]]] = [cands]
+    if len(cands) <= 8:
+        from itertools import combinations
+
+        for k in range(1, len(cands)):
+            options.extend([list(c) for c in combinations(cands, k)])
+    for chosen in options[:256]:
+        total = apply(chosen)
+        if _exact(total, meter_q):
+            return total
+    for e, length, t in saved:
+        e.length, e.t = length, t
+    return None
+
+
 def _layout_staff_robust(events: list[Event], meter_q: float) -> float:
     total = _layout_staff(events)
+    if _exact(total, meter_q):
+        return total
+    repaired = _repair_staff(events, meter_q)
+    if repaired is not None:
+        return repaired
+    _layout_staff(events)  # back to the plain reading (a failed repair leaves its own onsets)
+    if total > meter_q * 1.04:
+        unmarked = _unmarked_tuplets(events, meter_q)
+        if unmarked is not None:
+            return unmarked
+        # a whole-bar rest of a resting voice, printed above or below the staff and read as
+        # a half rest (on an outline page the two are told apart only by the ledger line):
+        # it takes no part in the timing of the voice that plays
+        outside = [
+            e for e in events
+            if not e.heads and e.base >= 2.0 and e.group is None
+            and (e.y > e.staff.top + 0.2 * e.staff.space or e.y < e.staff.bottom - 0.2 * e.staff.space)
+        ]
+        for r in outside:
+            rest = [e for e in events if e is not r]
+            if _exact(_layout_staff(rest), meter_q):
+                r.t, r.length, r.full_bar_rest = 0.0, meter_q, True
+                return meter_q
+        _layout_staff(events)
     if total <= meter_q * 1.04:
         return total
     # Too long for the meter. Usually the staff holds two voices whose events interleave
     # (e.g. rests of a second voice printed above the staff): time each voice on its own.
+    voice_state = [(e,e.length,e.t) for e in events]
     split = _voice_split(events)
     if split is not None:
         a, b = split
         ta = _layout_staff(a)
         tb = _layout_staff(b)
+        # A continuous triplet accompaniment can share its staff with a
+        # separately timed melody/rests. It must fill the bar on its own;
+        # trying to repair the combined interleaving cannot establish this.
+        if ta > meter_q*1.04:
+            fixed = _unmarked_tuplets(a,meter_q)
+            if fixed is not None:
+                ta = fixed
+        if tb > meter_q*1.04:
+            fixed = _unmarked_tuplets(b,meter_q)
+            if fixed is not None:
+                tb = fixed
         sounding_a = any(e.heads for e in a)
         sounding_b = any(e.heads for e in b)
         ok_a = not sounding_a or _fits(ta, meter_q)
         ok_b = not sounding_b or _fits(tb, meter_q)
         if ok_a and ok_b:
             return meter_q
+        for event,length,start in voice_state:
+            event.length,event.t = length,start
     # Rests printed out of place: lay out the notes alone
     notes = [e for e in events if e.heads]
     if notes and len(notes) < len(events):
@@ -1509,7 +2532,70 @@ def _layout_staff_robust(events: list[Event], meter_q: float) -> float:
     return _layout_staff(events)
 
 
-def _layout_bar(bar: Bar) -> float:
+def _anchors(staves: list[list[Event]]) -> tuple[tuple[float, float], ...]:
+    """(x, time) of the columns of staves that add up. Where two staves disagree about a
+    column the column is left out."""
+    found: list[tuple[float, float]] = []
+    for voice in staves:
+        for col in _columns(voice):
+            xs = sorted(e.x for e in col)
+            ts = [e.t for e in col]
+            if max(ts) - min(ts) <= TIME_EPS:
+                found.append((xs[len(xs) // 2], ts[0]))
+    found.sort()
+    out: list[tuple[float, float]] = []
+    clash = False
+    for x, t in found:
+        if out and abs(x - out[-1][0]) <= 2.2:
+            if abs(t - out[-1][1]) > 1e-3:
+                clash = True
+            continue
+        if clash:
+            out.pop()
+            clash = False
+        out.append((x, t))
+    if clash:
+        out.pop()
+    return tuple(out)
+
+
+def _beam_time_anchors(events: list[Event], anchors: tuple[tuple[float,float],...],
+                       meter_q: float) -> tuple[tuple[float,float],...]:
+    """A known time inside one beam fixes the neighbouring notes of that voice."""
+    groups: dict[int,list[Event]] = defaultdict(list)
+    for e in events:
+        if e.beam_group and e.heads and not e.grace:
+            groups[e.beam_group].append(e)
+    extra = []
+    for members in groups.values():
+        cols = _columns(members)
+        if len(cols)<2:
+            continue
+        if any(not e.heads and cols[0][0].x < e.x < cols[-1][0].x for e in events):
+            continue
+        if any(max(e.length for e in c)-min(e.length for e in c)>TIME_EPS for c in cols):
+            continue
+        offsets=[]
+        elapsed=0.0
+        for col in cols:
+            offsets.append(elapsed)
+            elapsed += col[0].length
+        starts=[]
+        for col,offset in zip(cols,offsets):
+            x=col[0].x
+            known=[(ax,t) for ax,t in anchors if abs(ax-x)<=2.2]
+            if known:
+                starts.append(min(known,key=lambda a:abs(a[0]-x))[1]-offset)
+        if not starts or max(starts)-min(starts)>.005:
+            continue
+        start=sum(starts)/len(starts)
+        if start < -TIME_EPS or start+elapsed>meter_q+TIME_EPS:
+            continue
+        extra.extend((col[0].x,max(0.0,start+offset)) for col,offset in zip(cols,offsets))
+    return tuple(sorted(set(anchors+tuple(extra)))) if extra else anchors
+
+
+def _layout_bar(bar: Bar, *, _allow_cross_staff: bool = True) -> float:
     """Give every event an onset (quarters from the bar start); return the bar length."""
     meter_q = bar.meter[0] * 4.0 / bar.meter[1]
     normal = [e for e in bar.events if not e.grace]
@@ -1519,11 +2605,110 @@ def _layout_bar(bar: Bar) -> float:
     staves: dict[int, list[Event]] = defaultdict(list)
     for e in normal:
         staves[e.staff.index].append(e)
+    # One beam can carry a voice between the two staves. Its printed staff is
+    # still needed for pitch and part assignment, but must not split its clock.
+    by_beam: dict[int,list[Event]] = defaultdict(list)
+    for e in normal:
+        if e.beam_group and e.heads:
+            by_beam[e.beam_group].append(e)
+    routes=[]
+    for members in by_beam.values():
+        counts=Counter(e.staff.index for e in members)
+        ranked=counts.most_common()
+        if len(ranked)<2 or ranked[0][1]==ranked[1][1]:
+            continue
+        # Nearby beams of two independent voices can touch in the drawing.
+        # A cross-staff run proceeds from one staff to the other; simultaneous
+        # columns on both staves are evidence of independent voices instead.
+        if any(len({e.staff.index for e in col}) > 1 for col in _columns(members)):
+            continue
+        routes.append((ranked[0][0],members))
+    cross_staff=bool(routes) and _allow_cross_staff
+    original=[]
+    groups={}
+    if cross_staff:
+        original=[(e,e.length,e.t) for e in bar.events]
+        groups={id(e.group):(e.group,e.group.ratio) for e in bar.events if e.group is not None}
+        baseline_length=_layout_bar(bar,_allow_cross_staff=False)
+        # A complete existing reading takes precedence over geometric inference.
+        if all(_exact(total,meter_q) for _,total in bar.totals):
+            return baseline_length
+        for e,length,t in original:
+            e.length,e.t=length,t
+        for group,ratio in groups.values():
+            group.ratio=ratio
+    for owner,members in routes if cross_staff else []:
+        ids={id(e) for e in members}
+        for staff,voice in staves.items():
+            if staff != owner:
+                voice[:]=[e for e in voice if id(e) not in ids]
+        staves[owner].extend(e for e in members if e.staff.index!=owner)
+    if cross_staff:
+        # A rest introducing a cross-staff run can itself be printed near the
+        # other staff. Match it to the following beam's rhythmic value and
+        # spacing, not just to the closest five staff lines.
+        for rest in (e for e in normal if not e.heads and 0 < e.length <= .5):
+            candidates=[]
+            for members in by_beam.values():
+                counts=Counter(e.staff.index for e in members).most_common()
+                if len(counts)>1 and counts[0][1]==counts[1][1]:
+                    continue
+                cols=_columns(members)
+                if len(cols)<2 or any(abs(e.length-rest.length)>TIME_EPS for e in members):
+                    continue
+                gaps=sorted(b[0].x-a[0].x for a,b in zip(cols,cols[1:]))
+                step=gaps[len(gaps)//2]
+                gap=cols[0][0].x-rest.x
+                if step>0 and .5*step <= gap <= 1.8*step:
+                    candidates.append((gap,counts[0][0]))
+            if not candidates:
+                continue
+            _,owner=min(candidates)
+            for staff,voice in staves.items():
+                if staff!=owner:
+                    voice[:]=[e for e in voice if e is not rest]
+            if not any(e is rest for e in staves[owner]):
+                staves[owner].append(rest)
+    staves={staff:voice for staff,voice in staves.items() if voice}
     voices = list(staves.values())
+    # A voice that rests the whole bar shows one rest, centred in the bar: next to the notes
+    # of another voice of its staff it takes no part in their timing.
+    for voice in voices:
+        others = [e for e in voice if not e.full_bar_rest]
+        if others and len(others) < len(voice):
+            for e in voice:
+                if e.full_bar_rest:
+                    e.t = 0.0
+            voice[:] = others
     # a whole rest alone on its staff fills the bar whatever the meter, but it must not
     # decide the bar's length (a pickup bar has a whole rest in the silent hand)
     rest_only = [len(v) == 1 and v[0].full_bar_rest for v in voices]
     totals = [_layout_staff_robust(voice, meter_q) for voice in voices]
+    # Events of every staff printed at one x start together: the staves that add up give the
+    # columns the others can be timed by (a voice with hidden rests, a tuplet of unusual size).
+    reliable = [i for i, t in enumerate(totals) if not rest_only[i] and _exact(t, meter_q)]
+    if reliable and len(reliable) < len([r for r in rest_only if not r]):
+        anchors = _anchors([voices[i] for i in reliable])
+        for i, voice in enumerate(voices):
+            if rest_only[i] or _exact(totals[i], meter_q):
+                continue
+            before = [(e, e.t) for e in voice]
+            voice_anchors = _beam_time_anchors(voice,anchors,meter_q) if cross_staff else anchors
+            repaired = _repair_staff(voice, meter_q, voice_anchors)
+            if repaired is None:
+                for e, t0 in before:
+                    e.t = t0
+            else:
+                totals[i] = repaired
+    if cross_staff and any(not rest_only[i] and not _exact(total,meter_q) for i,total in enumerate(totals)):
+        # Moving a voice must resolve the entire bar. A partly repaired bar
+        # would otherwise squeeze unrelated notes or shorten the next bar.
+        for e,length,t in original:
+            e.length,e.t=length,t
+        for group,ratio in groups.values():
+            group.ratio=ratio
+        return _layout_bar(bar,_allow_cross_staff=False)
+    bar.totals = list(zip(staves,totals))
     sounding = [t for t, r in zip(totals, rest_only) if not r]
     longest = max(sounding) if sounding else meter_q
     if longest > meter_q * 1.04:
@@ -1577,8 +2762,21 @@ class VectorScore:
     bpm: float
     bars: int
     timeline: list = field(default_factory=list)  # (start_q, Bar) as played
-    tempo_printed: bool = True
+    tempo_printed: bool = True  # the opening tempo is recognized, rather than defaulted
     tempos: list = field(default_factory=list)  # (start_q, bpm) changes after the first
+    key_signatures: list[tuple[float, int, int | None]] = field(default_factory=list)  # q, staff, fifths
+
+
+def _signature_fifths(signature: dict[int, int]) -> int | None:
+    """A conventional signature, kept distinct from note-local accidentals."""
+    signature = {step: alter for step, alter in signature.items() if alter}
+    if not signature:
+        return 0
+    for sign, order in ((1, (3, 0, 4, 1, 5, 2, 6)), (-1, (6, 2, 5, 1, 4, 0, 3))):
+        for count in range(1, 8):
+            if signature == {step: sign for step in order[:count]}:
+                return sign * count
+    return None
 
 
 def _number_voltas(bars: list[Bar]) -> None:
@@ -1645,6 +2843,15 @@ def _expand_repeats(bars: list[Bar]) -> list[Bar]:
     order: list[Bar] = []
     i = 0
     start = 0
+    # a repeat back to the beginning skips a pickup bar: its notes are the upbeat that the
+    # 1st ending (made short to match) leads into again
+    if len(bars) > 1 and not bars[0].repeat_start:
+        first = bars[0]
+        full = first.meter[0] * 4.0 / first.meter[1]
+        if first.length < full * 0.96 and any(
+            b.volta == 1 and b.length < full * 0.96 for b in bars[1:]
+        ):
+            start = 1
     pass_no = 1
     used_ends: set[int] = set()
     after_section = False
@@ -1675,6 +2882,28 @@ def _expand_repeats(bars: list[Bar]) -> list[Bar]:
     return order
 
 
+def _bar_tempo_changes(bar: Bar) -> list[tuple[float, float]]:
+    """Metronome marks at the nearest decoded onset, without assuming linear spacing.
+
+    Engraving stretches space for accidentals, lyrics and short notes. Its x coordinate
+    is not a musical clock. An aligned note/rest column gives us its decoded time; a
+    crowded mark between columns is conservatively snapped to the closest column.
+    A whole-bar rest is centred, so it cannot anchor a later speed over another voice.
+    """
+    changes = {0.0: bar.tempo} if bar.tempo > 0 else {}
+    normal = [e for e in bar.events if not e.grace and not e.full_bar_rest]
+    anchors = _anchors([normal]) if normal else ()
+    for x, mark in sorted(bar.tempo_positions, key=lambda pair: pair[0]):
+        if mark <= 0:
+            continue
+        if not anchors or x <= anchors[0][0]:
+            onset = 0.0
+        else:
+            onset = min(anchors, key=lambda pair: (abs(pair[0] - x), pair[1]))[1]
+        changes[max(0.0, onset)] = mark
+    return sorted(changes.items())
+
+
 def build_score(all_bars: list[Bar], bpm: float) -> VectorScore:
     for bar in all_bars:
         _layout_bar(bar)
@@ -1683,6 +2912,22 @@ def build_score(all_bars: list[Bar], bpm: float) -> VectorScore:
         meter_q = bar.meter[0] * 4.0 / bar.meter[1]
         if k > 0 and bar.length < meter_q * 0.96 and not bar.repeat_end and not bar.final and k != len(all_bars) - 1:
             bar.length = meter_q
+    local_tempos = {id(bar): _bar_tempo_changes(bar) for bar in all_bars}
+    first_changes = local_tempos[id(all_bars[0])] if all_bars else []
+    opening_mark = next((mark for offset, mark in first_changes if offset <= TIME_EPS), 0.0)
+    tempo_printed = opening_mark > 0 or bpm > 0
+    opening_bpm = opening_mark or bpm or DEFAULT_BPM
+    # The entry speed and later changes are distinct. Repeating a bar with a
+    # change on beat three must restore its entry speed before replaying that change.
+    source_tempos: dict[int, float] = {}
+    inherited = opening_bpm
+    for bar in all_bars:
+        entry = inherited
+        for offset, mark in local_tempos[id(bar)]:
+            if offset <= TIME_EPS:
+                entry = mark
+            inherited = mark
+        source_tempos[id(bar)] = entry
     _number_voltas(all_bars)
     played = _expand_repeats(all_bars)
     notes: list[ScoreNote] = []
@@ -1697,19 +2942,59 @@ def build_score(all_bars: list[Bar], bpm: float) -> VectorScore:
             q = full - first.length
     meters.append((0.0, played[0].meter if played else (4, 4)))
     held: dict[tuple[int, int], ScoreNote] = {}
+    silent_rests: dict[int, list[tuple[float, float]]] = defaultdict(list)
     timeline: list = []
     tempos: list[tuple[float, float]] = []
-    current = bpm
+    current = opening_bpm
+    performed_entries: dict[int, float] = {}
+    key_signatures: list[tuple[float, int, int | None]] = []
+    active_keys: dict[int, int | None] = {}
+    source_indexes = {id(bar): index for index, bar in enumerate(all_bars)}
+    previous_source_index: int | None = None
     for bar in played:
         timeline.append((q, bar))
-        if bar.tempo and abs(bar.tempo - (current or 0.0)) >= 0.5:
-            if q <= 1e-6 or not current:
-                bpm = current = bar.tempo
-            else:
-                tempos.append((q, bar.tempo))
-                current = bar.tempo
+        source_index = source_indexes[id(bar)]
+        backward_jump = previous_source_index is None or source_index <= previous_source_index
+        # Restore inherited tempo only on a backward repeat. A forward skip
+        # over the first ending must not import a tempo that was not played.
+        desired_tempo = performed_entries.get(id(bar), source_tempos[id(bar)]) if backward_jump else current
+        previous_source_index = source_index
+        if abs(desired_tempo - current) > 1e-6:
+            tempos.append((q, desired_tempo))
+            current = desired_tempo
+        # A later repeat may begin after a skipped first ending. Its actual
+        # first entry can differ from the linear written-source context.
+        # Snapshot the entry before mid-bar changes, with explicit q=0 first.
+        entry_tempo = next((mark for offset, mark in local_tempos[id(bar)] if offset <= TIME_EPS), current)
+        performed_entries.setdefault(id(bar), entry_tempo)
+        for offset, mark in local_tempos[id(bar)]:
+            if abs(mark - current) > 1e-6:
+                tempos.append((q + offset, mark))
+                current = mark
+        explicit_staffs = {ev.staff.index for ev in bar.events if ev.key_signature is not None}
+        key_candidates = [(q, staff, _signature_fifths(signature)) for staff, signature in enumerate(bar.keys)
+                          if staff not in explicit_staffs]
+        key_candidates += [(q+ev.t, ev.staff.index, _signature_fifths(ev.key_signature))
+                           for ev in bar.events if ev.key_signature is not None]
+        for key_q, staff, fifths in sorted(key_candidates, key=lambda mark: (mark[0], mark[1])):
+            if staff not in active_keys or active_keys[staff] != fifths:
+                key_signatures.append((key_q, staff, fifths))
+                active_keys[staff] = fifths
         if not meters or meters[-1][1] != bar.meter:
             meters.append((q, bar.meter))
+        normal = [e for e in bar.events if not e.grace]
+        for rest in (e for e in normal if not e.heads and e.length > TIME_EPS):
+            # A second voice's rest must not stop the voice that is sounding.
+            # Only a rest with no overlapping notes on its staff is evidence
+            # of silence across which a tie cannot continue.
+            total = dict(bar.totals).get(rest.staff.index)
+            if total is None or not _exact(total, bar.meter[0]*4.0/bar.meter[1]):
+                continue  # uncertain/repaired timing is not evidence of a real gap
+            overlaps = any(e.heads and e.staff.index == rest.staff.index
+                           and max(e.t, rest.t) < min(e.t+e.length, rest.t+rest.length)-TIME_EPS
+                           for e in normal)
+            if not overlaps:
+                silent_rests[rest.staff.index].append((q+rest.t, q+rest.t+rest.length))
         for ev in sorted(bar.events, key=lambda e: (e.t, e.x)):
             if ev.trem_second:
                 continue  # played by its partner
@@ -1722,7 +3007,13 @@ def build_score(all_bars: list[Bar], bpm: float) -> VectorScore:
                     t0 = q + ev.t + k * sub
                     for h in chords[k % len(chords)]:
                         if k == 0 and h.tied:
-                            continue
+                            previous = held.get((ev.staff.index, h.pitch))
+                            interrupted = previous is not None and any(
+                                start < t0-TIME_EPS and end > previous.end_q+TIME_EPS
+                                for start,end in silent_rests[ev.staff.index])
+                            if previous is not None and previous.end_q >= t0-TIE_GAP and not interrupted:
+                                previous.end_q = max(previous.end_q, t0 + sub)
+                                continue
                         n = ScoreNote(h.pitch, t0, t0 + sub, ev.staff.index)
                         notes.append(n)
                         held[(ev.staff.index, h.pitch)] = n
@@ -1730,14 +3021,14 @@ def build_score(all_bars: list[Bar], bpm: float) -> VectorScore:
             for h in ev.heads:
                 key = (ev.staff.index, h.pitch)
                 onset = q + ev.t
-                # a tie only holds on the note sounding right up to this one; a "tie" to a
-                # note that ended long before is a curve read as a tie: the note is played
-                if h.tied and key in held and held[key].end_q >= onset - TIE_GAP:
+                # Allow small recognition gaps in tied note values, but never
+                # fill an explicitly silent rest or delete an orphan note.
+                previous = held.get(key)
+                interrupted = h.tied and previous is not None and any(
+                    start < onset-TIME_EPS and end > previous.end_q+TIME_EPS
+                    for start,end in silent_rests[ev.staff.index])
+                if h.tied and previous is not None and previous.end_q >= onset-TIE_GAP and not interrupted:
                     held[key].end_q = max(held[key].end_q, onset + ev.length)
-                    continue
-                if h.tied and key in held:
-                    h.tied = False
-                if h.tied:
                     continue
                 n = ScoreNote(
                     h.pitch,
@@ -1752,23 +3043,42 @@ def build_score(all_bars: list[Bar], bpm: float) -> VectorScore:
         q += bar.length
     if not notes:
         raise VectorScoreError("没有读出音符")
-    return VectorScore(notes, meters, bpm or DEFAULT_BPM, len(played), timeline, tempo_printed=bpm > 0, tempos=tempos)
+    return VectorScore(notes, meters, opening_bpm, len(played), timeline,
+                       tempo_printed=tempo_printed, tempos=tempos, key_signatures=key_signatures)
 
 
 def _tempo_marks(drawing: PageDrawing) -> list[tuple[float, float, float]]:
     """Metronome marks of a page as (x, y, bpm), in reading order: a note glyph followed
-    by '= 72'."""
+    by '= 72'. The bpm is in quarter notes (what a MIDI tempo counts): a half-note, eighth-note
+    or dotted mark is converted."""
     out: list[tuple[float, float, float]] = []
     marks = [g for g in drawing.glyphs if g.music and g.code in (0x143, 0x144, 0x145)]
     for m in marks:
         texts = sorted(
-            [g for g in drawing.glyphs if not g.music and abs(g.y - m.y) <= 4 and 0 <= g.l - m.r <= 40],
+            [
+                g for g in drawing.glyphs
+                if (not g.music or 0x130 <= g.code <= 0x139) and abs(g.y - m.y) <= 4 and 0 <= g.l - m.r <= 40
+            ],
             key=lambda g: g.l,
         )
-        s = "".join(g.text for g in texts)
+        # a page drawn as outlines may give a digit the shape of a time-signature digit
+        s = "".join(str(g.code - 0x130) if g.music else g.text for g in texts)
         found = re.search(r"=\s*(\d{2,3})", s)
         if found:
-            out.append((m.x, m.y, float(found.group(1))))
+            beat = {0x143: 1.0, 0x144: 2.0, 0x145: 0.5}[m.code]
+            eq = next((g for g in texts if not g.music and g.text == "="), None)
+            right = eq.l if eq is not None else m.r + 8
+            h = max(m.t - m.b, 1.0)
+            dotted = any(
+                g.music and g.code == DOT and m.r - 0.5 <= g.l and g.r <= right and m.b - 0.1 * h <= g.y <= m.b + 0.5 * h
+                for g in drawing.glyphs
+            ) or any(
+                ln.x1 - ln.x0 < 0.5 and abs(ln.y1 - ln.y0) < 0.5 and m.r - 0.5 <= ln.x0 <= right and m.b - 0.1 * h <= ln.y0 <= m.b + 0.5 * h
+                for ln in drawing.lines
+            )
+            if dotted:
+                beat *= 1.5
+            out.append((m.x, m.y, float(found.group(1)) * beat))
     return sorted(out, key=lambda mark: (-mark[1], mark[0]))
 
 
@@ -1779,7 +3089,7 @@ def _tempo_of(drawing: PageDrawing) -> float:
 
 
 def _mark_tempo_bars(marks: list[tuple[float, float, float]], systems: list[list[Staff]], bars: list[Bar]) -> None:
-    """Each metronome mark belongs to the bar it is printed over."""
+    """Keep every mark's horizontal position until note/rest onsets are laid out."""
     for x, y, bpm in marks:
         over = [(i, s) for i, s in enumerate(systems) if s[0].top - 1 <= y <= s[0].top + 16 * s[0].space]
         if not over:
@@ -1790,10 +3100,10 @@ def _mark_tempo_bars(marks: list[tuple[float, float, float]], systems: list[list
             continue
         target = next((b for b in line if b.x0 - 2 <= x < b.x1), line[0] if x < line[0].x0 else None)
         if target is not None:
-            target.tempo = bpm
+            target.tempo_positions.append((x, bpm))
 
 
-def read_vector_pdf(pdf: Path, max_pages: int = 40, cancel=None) -> VectorScore:
+def read_vector_pdf(pdf: Path, max_pages: int | None = None, cancel=None) -> VectorScore:
     import pypdfium2 as pdfium
 
     try:
@@ -1802,17 +3112,14 @@ def read_vector_pdf(pdf: Path, max_pages: int = 40, cancel=None) -> VectorScore:
         raise VectorScoreError("无法打开这个 PDF") from exc
     state = ReaderState()
     all_bars: list[Bar] = []
-    bpm = 0.0
     try:
-        for index in range(min(len(doc), max_pages)):
+        for index in range(len(doc) if max_pages is None else min(len(doc), max_pages)):
             if cancel is not None and cancel.is_set():
                 from app.engines.base import CancelledError
 
                 raise CancelledError()
             drawing = read_drawing(doc[index])
             marks = _tempo_marks(drawing)
-            if not bpm and marks:
-                bpm = marks[0][2]
             staves = find_staves(drawing)
             if not staves:
                 continue
@@ -1830,7 +3137,7 @@ def read_vector_pdf(pdf: Path, max_pages: int = 40, cancel=None) -> VectorScore:
         doc.close()
     if not all_bars:
         raise VectorScoreError("没有找到五线谱")
-    return build_score(all_bars, bpm)
+    return build_score(all_bars, 0.0)
 
 
 TEMPO_NOT_PRINTED = "PianoConvert: tempo not printed"
@@ -1858,6 +3165,7 @@ def write_midi(score: VectorScore, dest: Path) -> Path:
         return starts[i] + (q - marks[i][0]) * 60.0 / marks[i][1]
 
     pm = pretty_midi.PrettyMIDI(initial_tempo=score.bpm)
+    pm.text_events.append(pretty_midi.Text(f"{ANNOTATION}timing:notated",0.0))
     if len(marks) > 1:
         res = pm.resolution
         pm._tick_scales = [(int(round(q * res)), 60.0 / (bpm * res)) for q, bpm in marks]
@@ -1865,6 +3173,14 @@ def write_midi(score: VectorScore, dest: Path) -> Path:
         pm._update_tick_to_time(int(round((last_q + 8) * res)))
     for q, (num, den) in score.meters:
         pm.time_signature_changes.append(pretty_midi.TimeSignature(num, den, seconds(q)))
+    # Standard MIDI carries the upper staff's key. Per-staff annotations keep
+    # differing staff signatures and unknown/nonstandard keys from leaking.
+    major_pc = (11, 6, 1, 8, 3, 10, 5, 0, 7, 2, 9, 4, 11, 6, 1)
+    for q, staff, fifths in score.key_signatures:
+        value = str(fifths) if fifths is not None else "?"
+        pm.text_events.append(pretty_midi.Text(f"{ANNOTATION}key:Staff {staff+1}:{value}", seconds(q)))
+        if staff == 0 and fifths is not None:
+            pm.key_signature_changes.append(pretty_midi.KeySignature(major_pc[fifths+7], seconds(q)))
     if not score.tempo_printed:
         pm.text_events.append(pretty_midi.Text(TEMPO_NOT_PRINTED, 0.0))
     staves = sorted({n.staff for n in score.notes})
@@ -1893,7 +3209,7 @@ def write_midi(score: VectorScore, dest: Path) -> Path:
 
 
 def tempo_printed(midi: Path) -> bool:
-    """False for a MIDI written by write_midi from a PDF that prints no tempo."""
+    """False when the PDF's opening tempo was not recognized (later changes may exist)."""
     import pretty_midi
 
     try:

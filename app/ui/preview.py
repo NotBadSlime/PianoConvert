@@ -131,7 +131,7 @@ def split_sections(text: str) -> dict[str, str]:
     return sections
 
 
-_META = re.compile(r"(\d+/\d+)\s+♩=(\d+)\s+每拍\s*(\d+)\s*格")
+_META = re.compile(r"(\d+/\d+)\s+♩=(\d+(?:\.\d+)?)\s+每拍\s*(\d+)\s*格")
 
 
 def score_meta(text: str) -> list[str]:
@@ -200,11 +200,11 @@ def line_roles(text: str) -> list[str]:
     roles = ["key"] * len(text)
     in_mark = False
     for i, ch in enumerate(text):
-        if ch == "〔":
+        if ch in "〔〈":
             in_mark = True
         if in_mark:
             roles[i] = "mark"
-        if ch == "〕":
+        if ch in "〕〉":
             in_mark = False
     match = _BAR_NUMBER.match(text)
     if match and "|" in text:

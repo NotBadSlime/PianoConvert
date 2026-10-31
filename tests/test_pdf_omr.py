@@ -197,6 +197,151 @@ def test_recognize_runs_homr_with_relative_path(tmp_path, monkeypatch):
     assert seen["cwd"] == str(pages)
 
 
+def _fake_homr(monkeypatch, code: str) -> None:
+    """Make _run_homr start a small Python script instead of homr."""
+    import sys
+
+    import app.pdf_omr as omr
+
+    monkeypatch.setattr(omr, "_command", lambda _target: [sys.executable, "-c", code])
+
+
+def test_cancel_works_while_homr_prints_nothing(tmp_path, monkeypatch):
+    """A silent or stuck homr process must not block 取消 (it used to wait in readline)."""
+    import threading
+    import time
+
+    import app.pdf_omr as omr
+    from app.engines.base import CancelledError
+
+    _fake_homr(monkeypatch, "import time; time.sleep(60)")
+    cancel = Event()
+    threading.Timer(0.5, cancel.set).start()
+    started = time.monotonic()
+    try:
+        omr._run_homr(tmp_path, 1, cancel, lambda _m, _p: None)
+        assert False
+    except CancelledError:
+        pass
+    assert time.monotonic() - started < 10
+
+
+def test_homr_download_and_page_lines_show_progress(tmp_path, monkeypatch):
+    import app.pdf_omr as omr
+
+    _fake_homr(
+        monkeypatch,
+        "import sys\n"
+        "e = sys.stderr\n"
+        "print('Downloading 1 models - this is only required once', file=e)\n"
+        "print('\\rDownloaded 5 of 10 MB (50%)', end='', file=e, flush=True)\n"
+        "print('\\rDownloaded 10 of 10 MB (100%)', file=e)\n"
+        "print('Processing ./page_001.png', file=e)\n",
+    )
+    seen = []
+    omr._run_homr(tmp_path, 1, Event(), lambda message, _ratio: seen.append(message))
+    assert "下载识别模型（仅第一次）· 5/10 MB" in seen
+    assert seen[-1] == "识别第 1/1 页（准确度有限）"
+
+
+def test_failed_homr_download_is_reported_as_network_problem(tmp_path, monkeypatch):
+    import app.pdf_omr as omr
+
+    _fake_homr(
+        monkeypatch,
+        "import sys\n"
+        "print('Exception: Failed to download file https://github.com/x.zip.', file=sys.stderr)\n"
+        "sys.exit(3)\n",
+    )
+    try:
+        omr._run_homr(tmp_path, 1, Event(), lambda _m, _p: None)
+        assert False
+    except PdfOmrError as exc:
+        assert str(exc) == omr.DOWNLOAD_FAILED
+
+
+def test_homr_process_ends_with_an_exit_code_instead_of_a_crash_dialog(monkeypatch, capsys):
+    """In the windowed app an uncaught error opens a modal box that keeps homr alive."""
+    import app.pdf_omr as omr
+
+    def _boom() -> None:
+        raise RuntimeError("Failed to download file")
+
+    monkeypatch.setattr(omr, "_redirect_homr_models", _boom)
+    try:
+        omr.homr_entry(".")
+        assert False
+    except SystemExit as exc:
+        assert exc.code == omr.HOMR_EXIT_FAILED
+    err = capsys.readouterr().err
+    assert f"{omr.HOMR_FAILED}: RuntimeError: Failed to download file" in err
+    assert "Traceback" in err
+
+
+def _image_route(tmp_path, monkeypatch, calls):
+    """recognize_pdf on a picture, with page preparation and homr replaced."""
+    import app.pdf_omr as omr
+    # These tests exercise the retained HOMR backend explicitly; default routing
+    # to Copista is verified separately with native Copista XML.
+    monkeypatch.setattr(omr, "DEFAULT_OMR_ENGINE", "homr")
+
+    def fake_prepare(_source, pages_dir):
+        pages_dir.mkdir(parents=True, exist_ok=True)
+        page = pages_dir / "page_001.png"
+        page.write_bytes(b"png")
+        return [page]
+
+    def fake_homr(pages_dir, total, cancel, progress):
+        calls.append("homr")
+        (pages_dir / "page_001.musicxml").write_text(PAGE_XML.format(a="C", b="D"), encoding="utf-8")
+        return ""
+
+    monkeypatch.setattr(omr, "prepare_pages", fake_prepare)
+    monkeypatch.setattr(omr, "_is_jianpu", lambda _images: False)
+    monkeypatch.setattr(omr, "_run_homr", fake_homr)
+    src = tmp_path / "photo.png"
+    src.write_bytes(b"png")
+    return src
+
+
+def test_models_are_downloaded_with_progress_before_homr_starts(tmp_path, monkeypatch):
+    import app.pdf_omr as omr
+    from app import homr_models
+
+    calls, seen = [], []
+
+    def fake_ensure(cancel, on_status=None, **_kw):
+        calls.append("download")
+        on_status(homr_models.DownloadStatus(2, 3, "m.onnx", 23 << 20, 46 << 20))
+        return []
+
+    monkeypatch.setattr(homr_models, "ensure_models", fake_ensure)
+    src = _image_route(tmp_path, monkeypatch, calls)
+    result = omr.recognize_pdf(src, tmp_path / "work", Event(), lambda m, r: seen.append((m, r)))
+    assert calls == ["download", "homr"]
+    assert any(m == "下载识别模型（仅第一次）2/3 · 23/46 MB" and abs(r - 0.25) < 1e-9 for m, r in seen)
+    assert result.name == "photo_merged.musicxml"
+
+
+def test_model_download_failure_stops_before_homr(tmp_path, monkeypatch):
+    import app.pdf_omr as omr
+    from app import homr_models
+
+    calls = []
+
+    def fake_ensure(cancel, on_status=None, **_kw):
+        raise homr_models.ModelDownloadError("no network")
+
+    monkeypatch.setattr(homr_models, "ensure_models", fake_ensure)
+    src = _image_route(tmp_path, monkeypatch, calls)
+    try:
+        omr.recognize_pdf(src, tmp_path / "work", Event())
+        assert False
+    except PdfOmrError as exc:
+        assert str(exc) == omr.DOWNLOAD_FAILED
+    assert calls == []
+
+
 def test_prepare_image_flattens_transparency_and_upscales(tmp_path):
     from PIL import Image
 

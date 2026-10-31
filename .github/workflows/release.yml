@@ -55,6 +55,10 @@ jobs:
       - name: Download piano model
         shell: pwsh
         run: .\scripts\download_model.ps1 -Output "models\note_F1=0.9677_pedal_F1=0.9186.pth"
+      - name: Download pinned Copista 28m weights
+        run: python -m app.copista_models --package
+      - name: Download homr models (shipped, so reading scans needs no download)
+        run: python -m app.homr_models
       - run: PyInstaller app.spec --noconfirm
       - name: Smoke test frozen app
         shell: pwsh
